@@ -6,8 +6,25 @@ import numpy as np
 import soundfile as sf
 import torchaudio
 from cached_path import cached_path
+from transformers import AutoModelForCausalLM, AutoTokenizer
 from num2words import num2words
-from f5_tts.model import DiT
+
+try:
+    import spaces
+
+    USING_SPACES = True
+except ImportError:
+    USING_SPACES = False
+
+
+def gpu_decorator(func):
+    if USING_SPACES:
+        return spaces.GPU(func)
+    else:
+        return func
+
+
+from f5_tts.model import DiT, UNetT
 from f5_tts.infer.utils_infer import (
     load_vocoder,
     load_model,
@@ -17,247 +34,366 @@ from f5_tts.infer.utils_infer import (
     save_spectrogram,
 )
 
-# Modelo de inferencia y vocoder
+# Cargar el vocoder y el modelo de F5-TTS
 vocoder = load_vocoder()
 F5TTS_model_cfg = dict(dim=1024, depth=22, heads=16, ff_mult=2, text_dim=512, conv_layers=4)
 F5TTS_ema_model = load_model(
     DiT, F5TTS_model_cfg, str(cached_path("hf://jpgallegoar/F5-Spanish/model_1200000.safetensors"))
 )
 
-# Variables globales para mantener el estado entre fases
-uploaded_tts_audio = gr.State(value=None)
-uploaded_reference_audio = gr.State(value=None)
-transcription_text = gr.State(value="")
-emotions_data = gr.State(value=[])
-generated_audio_output = gr.State(value=None)
+# Función para traducir números a texto
+def traducir_numero_a_texto(texto):
+    texto_separado = re.sub(r'([A-Za-z])(\d)', r'\1 \2', texto)
+    texto_separado = re.sub(r'(\d)([A-Za-z])', r'\1 \2', texto_separado)
 
-# Fase 1: Subir archivo generado por TTS
-def phase_1_submit(file):
-    """
-    Validación del archivo TTS subido en la fase 1.
-    """
-    if file is None:
-        return "Por favor, sube un archivo de audio.", gr.update(visible=True)
-    uploaded_tts_audio.value = file
-    return "Archivo cargado con éxito. Avanzando a la fase 2...", gr.update(visible=False)
+    def reemplazar_numero(match):
+        numero = match.group()
+        return num2words(int(numero), lang="es")
 
-def phase_1_cancel():
-    """
-    Reiniciar la fase 1 si se cancela la operación.
-    """
-    uploaded_tts_audio.value = None
-    return "Carga cancelada. Por favor, sube nuevamente el archivo.", gr.update(visible=True)
+    texto_traducido = re.sub(r'\b\d+\b', reemplazar_numero, texto_separado)
 
-# Interfaz para la fase 1
-with gr.Blocks() as phase_1:
-    gr.Markdown("## Fase 1: Subir archivo generado por TTS")
-    tts_audio_input = gr.Audio(label="Sube tu archivo TTS (formato .wav o .mp3)", type="filepath")
-    tts_submit = gr.Button("Aceptar")
-    tts_cancel = gr.Button("Cancelar")
-    tts_feedback = gr.Textbox(visible=False, label="Estado de la carga")
+    return texto_traducido
 
-    # Configuración de eventos
-    tts_submit.click(phase_1_submit, inputs=tts_audio_input, outputs=[tts_feedback, phase_1])
-    tts_cancel.click(phase_1_cancel, outputs=[tts_feedback, phase_1])
-# Fase 2: Subir o grabar audio de referencia
-def phase_2_submit(audio, example_text):
-    """
-    Validación del audio de referencia en la fase 2.
-    """
-    if audio is None:
-        return "Por favor, sube o graba un audio de referencia.", gr.update(visible=True)
-    uploaded_reference_audio.value = audio
-    return "Audio de referencia cargado con éxito. Avanzando a la fase 3...", gr.update(visible=False)
 
-def phase_2_cancel():
-    """
-    Reiniciar la fase 2 si se cancela la operación.
-    """
-    uploaded_reference_audio.value = None
-    return "Carga cancelada. Por favor, vuelve a intentar.", gr.update(visible=True)
+# Función principal de inferencia
+@gpu_decorator
+def infer(
+    ref_audio_orig, ref_text, gen_text, model, remove_silence, cross_fade_duration=0.15, speed=1, show_info=gr.Info
+):
+    ref_audio, ref_text = preprocess_ref_audio_text(ref_audio_orig, ref_text, show_info=show_info)
 
-# Interfaz para la fase 2
-with gr.Blocks() as phase_2:
-    gr.Markdown("## Fase 2: Subir o grabar audio de referencia")
-    ref_audio_input = gr.Audio(label="Sube tu archivo de referencia o graba uno", type="filepath")
-    example_text = gr.Textbox(
-        value="Texto de ejemplo para grabación (diseñado para ~15 segundos de lectura).",
-        label="Texto de ejemplo",
-        interactive=False,
+    ema_model = F5TTS_ema_model
+
+    if not gen_text.startswith(" "):
+        gen_text = " " + gen_text
+    if not gen_text.endswith(". "):
+        gen_text += ". "
+
+    gen_text = gen_text.lower()
+    gen_text = traducir_numero_a_texto(gen_text)
+
+    final_wave, final_sample_rate, combined_spectrogram = infer_process(
+        ref_audio,
+        ref_text,
+        gen_text,
+        ema_model,
+        vocoder,
+        cross_fade_duration=cross_fade_duration,
+        speed=speed,
+        show_info=show_info,
+        progress=gr.Progress(),
     )
-    ref_submit = gr.Button("Aceptar")
-    ref_cancel = gr.Button("Cancelar")
-    ref_feedback = gr.Textbox(visible=False, label="Estado de la carga")
 
-    # Configuración de eventos
-    ref_submit.click(phase_2_submit, inputs=[ref_audio_input, example_text], outputs=[ref_feedback, phase_2])
-    ref_cancel.click(phase_2_cancel, outputs=[ref_feedback, phase_2])
-# Fase 3: Tipos de habla
-def add_emotion(name, audio, current_emotions):
-    """
-    Agregar un nuevo tipo de habla/emoción.
-    """
-    if not name or audio is None:
-        return "Debe proporcionar un nombre y un audio para la emoción.", current_emotions
-    new_emotion = {"name": name, "audio": audio}
-    current_emotions.append(new_emotion)
-    return "Emoción agregada con éxito.", current_emotions
+    # Eliminar silencios, si es necesario
+    if remove_silence:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as f:
+            sf.write(f.name, final_wave, final_sample_rate)
+            remove_silence_for_generated_wav(f.name)
+            final_wave, _ = torchaudio.load(f.name)
+        final_wave = final_wave.squeeze().cpu().numpy()
 
-def delete_emotion(name, current_emotions):
-    """
-    Eliminar un tipo de habla/emoción existente.
-    """
-    current_emotions = [e for e in current_emotions if e["name"] != name]
-    return "Emoción eliminada.", current_emotions
+    # Guardar espectrograma
+    with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp_spectrogram:
+        spectrogram_path = tmp_spectrogram.name
+        save_spectrogram(combined_spectrogram, spectrogram_path)
 
-# Interfaz para la fase 3
-with gr.Blocks() as phase_3:
-    gr.Markdown("## Fase 3: Agregar Tipos de Habla")
-    emotion_name = gr.Textbox(label="Nombre de la emoción")
-    emotion_audio = gr.Audio(label="Audio de la emoción", type="filepath")
-    add_emotion_btn = gr.Button("Agregar emoción")
-    delete_emotion_btn = gr.Button("Eliminar emoción")
-    emotions_list = gr.Dropdown(choices=[], label="Lista de emociones")
-    emotion_feedback = gr.Textbox(visible=False, label="Estado de las emociones")
+    return (final_sample_rate, final_wave), spectrogram_path
 
-    # Configuración de eventos
-    add_emotion_btn.click(
-        add_emotion, inputs=[emotion_name, emotion_audio, emotions_data], outputs=[emotion_feedback, emotions_list]
-    )
-    delete_emotion_btn.click(
-        delete_emotion, inputs=[emotions_list, emotions_data], outputs=[emotion_feedback, emotions_list]
-    )
-# Fase 4: Edición del texto transcrito
-def add_emotion_to_text(current_text, emotion_name, position):
-    """
-    Agregar una emoción al texto en una posición específica.
-    """
-    return current_text[:position] + f"{{{emotion_name}}}" + current_text[position:]
 
-def add_tag_to_text(current_text, tag, position):
-    """
-    Agregar una marca de texto (como velocidad o tono) en una posición específica.
-    """
-    return current_text[:position] + f"{{{tag}}}" + current_text[position:]
+# Fase 1: Subida de audio inicial
+def phase1():
+    def accept_audio(audio_path):
+        """Acepta el audio y avanza a la siguiente fase."""
+        if audio_path:
+            return "Audio aceptado, pasando a la Fase 2", gr.update(visible=False), gr.update(visible=True)
+        else:
+            return "Por favor, sube un audio válido.", gr.update(), gr.update()
 
-# Interfaz para la fase 4
-with gr.Blocks() as phase_4:
-    gr.Markdown("## Fase 4: Edición del Texto Transcrito")
-    transcription_input = gr.Textbox(
-        label="Texto Transcrito",
-        lines=10,
-        placeholder="Modifica aquí el texto transcrito. Ejemplo:\n{Feliz} Hola, ¿cómo estás? {Velocidad +} Me alegra verte."
-    )
-    emotion_select = gr.Dropdown(label="Selecciona una emoción para agregar al texto", choices=[])
-    text_position = gr.Slider(minimum=0, maximum=500, step=1, label="Posición en el texto")
-    add_emotion_btn = gr.Button("Agregar Emoción al Texto")
-    tag_select = gr.Dropdown(
-        label="Selecciona una marca de texto",
-        choices=["Velocidad +", "Velocidad -", "Grave", "Agudo", "Silencio"]
-    )
-    add_tag_btn = gr.Button("Agregar Marca al Texto")
-    updated_text_output = gr.Textbox(label="Texto Modificado")
+    def cancel_audio():
+        """Reinicia la fase 1."""
+        return "Sube un audio válido para comenzar.", gr.update(visible=True), gr.update(visible=False)
 
-    # Configuración de eventos
-    add_emotion_btn.click(
-        add_emotion_to_text, 
-        inputs=[transcription_input, emotion_select, text_position], 
-        outputs=updated_text_output
-    )
-    add_tag_btn.click(
-        add_tag_to_text,
-        inputs=[transcription_input, tag_select, text_position],
-        outputs=updated_text_output
-    )
-# Fase 5: Inferencia y generación
-def run_inference(tts_audio, ref_audio, text, emotions, progress=gr.Progress()):
-    """
-    Realiza la inferencia para generar el audio final.
-    """
-    progress(0.1)
-    # Simula el proceso de inferencia con chunks
-    generated_segments = []
-    for emotion in emotions:
-        # Aquí se realizaría la inferencia real para cada segmento.
-        generated_segments.append(emotion["audio"])
-        progress(0.7)
+    with gr.Blocks() as phase1_app:
+        gr.Markdown("### Fase 1: Subida de Audio Inicial")
+        uploaded_audio = gr.Audio(label="Sube un audio generado por TTS cualquiera", type="filepath")
+        accept_button = gr.Button("Aceptar")
+        cancel_button = gr.Button("Cancelar")
 
-    # Simula la concatenación de audio generado
-    final_audio = np.concatenate([np.random.random(16000) for _ in generated_segments])
-    progress(1.0)
+        # Mensaje de estado
+        status_message = gr.Textbox(label="Estado", value="Sube un audio válido para comenzar.", interactive=False)
 
-    # Simula los espectrogramas
-    spectrogram1 = "spectrogram1.png"  # Reemplaza con la generación real
-    spectrogram2 = "spectrogram2.png"  # Reemplaza con la generación real
+        # Contenedores de fases
+        phase1_container = gr.Row(visible=True)
+        phase2_container = gr.Row(visible=False)
 
-    return final_audio, spectrogram1, spectrogram2
+        # Acciones de los botones
+        accept_button.click(
+            accept_audio,
+            inputs=[uploaded_audio],
+            outputs=[status_message, phase1_container, phase2_container],
+        )
 
-# Interfaz para la fase 5
-with gr.Blocks() as phase_5:
-    gr.Markdown("## Fase 5: Inferencia y Generación")
-    generate_btn = gr.Button("Generar Audio Final")
-    generated_audio = gr.Audio(label="Audio Generado")
-    spectrogram1 = gr.Image(label="Espectrograma Original (Fase 1)")
-    spectrogram2 = gr.Image(label="Espectrograma Modificado (Fase 5)")
+        cancel_button.click(
+            cancel_audio,
+            inputs=[],
+            outputs=[status_message, phase1_container, phase2_container],
+        )
 
-    # Configuración de evento de generación
-    generate_btn.click(
-        run_inference,
-        inputs=[uploaded_tts_audio, uploaded_reference_audio, transcription_text, emotions_data],
-        outputs=[generated_audio, spectrogram1, spectrogram2]
-    )
+    return phase1_app
+
+
+# App principal con integración de fases
 with gr.Blocks() as app:
-    gr.Markdown("# Proceso de Clonación de Voz por Fases")
-    current_phase = gr.State(value=1)
+    gr.Markdown("# Spanish-F5 TTS - Multi-Fase")
+    phase1_app = phase1()  # Fase 1
+    phase1_app.render()
+def phase2():
+    def accept_reference(audio_path, text):
+        """Acepta el audio de referencia y avanza a la siguiente fase."""
+        if audio_path and text:
+            return (
+                "Audio de referencia aceptado. Pasando a la Fase 3.",
+                gr.update(visible=False),
+                gr.update(visible=True),
+            )
+        else:
+            return "Por favor, sube un audio y texto válidos.", gr.update(), gr.update()
+
+    def cancel_reference():
+        """Reinicia la fase 2."""
+        return "Sube un audio y texto válidos para continuar.", gr.update(visible=True), gr.update(visible=False)
+
+    with gr.Row(visible=False) as phase2_container:
+        gr.Markdown("### Fase 2: Subida o Grabación de Audio de Referencia")
+
+        with gr.Column():
+            ref_audio = gr.Audio(label="Sube o graba un audio de referencia", type="filepath")
+            ref_text = gr.Textbox(
+                label="Texto de ejemplo para referencia (15 segundos de lectura)",
+                placeholder="Ejemplo: Hola, este es un texto de referencia para clonar la voz.",
+            )
+
+            accept_ref_button = gr.Button("Aceptar")
+            cancel_ref_button = gr.Button("Cancelar")
+
+        # Mensaje de estado
+        ref_status_message = gr.Textbox(label="Estado", value="", interactive=False)
+
+        # Acciones de los botones
+        accept_ref_button.click(
+            accept_reference,
+            inputs=[ref_audio, ref_text],
+            outputs=[ref_status_message, phase2_container, gr.update(visible=True)],
+        )
+        cancel_ref_button.click(
+            cancel_reference,
+            inputs=[],
+            outputs=[ref_status_message, phase2_container, gr.update(visible=True)],
+        )
+
+    return phase2_container
+
+def phase3():
+    def add_emotion(emotion_name, emotion_audio):
+        """Agrega un nuevo tipo de habla/emoción."""
+        if emotion_name and emotion_audio:
+            return f"Tipo de habla '{emotion_name}' agregado.", gr.update(), gr.update()
+        else:
+            return "Por favor, proporciona un nombre y un archivo de audio.", gr.update()
+
+    def delete_emotion(emotion_name):
+        """Elimina un tipo de habla."""
+        if emotion_name:
+            return f"Tipo de habla '{emotion_name}' eliminado.", gr.update()
+        else:
+            return "Por favor, selecciona un tipo de habla para eliminar.", gr.update()
+
+    with gr.Row(visible=False) as phase3_container:
+        gr.Markdown("### Fase 3: Configuración de Tipos de Habla")
+
+        with gr.Column():
+            emotion_name = gr.Textbox(label="Nombre de la Emoción")
+            emotion_audio = gr.Audio(label="Sube o graba un audio para esta emoción", type="filepath")
+            add_emotion_button = gr.Button("Agregar Emoción")
+            delete_emotion_button = gr.Button("Eliminar Emoción")
+
+            # Mensaje de estado
+            emotion_status_message = gr.Textbox(label="Estado", value="", interactive=False)
+
+        add_emotion_button.click(
+            add_emotion, inputs=[emotion_name, emotion_audio], outputs=[emotion_status_message]
+        )
+        delete_emotion_button.click(delete_emotion, inputs=[emotion_name], outputs=[emotion_status_message])
+
+    return phase3_container
+def phase4():
+    def modify_text(transcription, emotion_name, text_mark):
+        """Modifica el texto transcrito con emociones o marcas de texto."""
+        if transcription and emotion_name:
+            updated_text = transcription + f"{{{emotion_name}}} "
+        elif transcription and text_mark:
+            updated_text = transcription + f"{{{text_mark}}} "
+        else:
+            updated_text = transcription
+        return updated_text
+
+    with gr.Row(visible=False) as phase4_container:
+        gr.Markdown("### Fase 4: Modificación del Texto Transcrito")
+
+        with gr.Column():
+            transcription = gr.Textbox(
+                label="Texto Transcrito",
+                placeholder="Ejemplo: Hola, este es un texto transcrito de referencia.",
+                lines=5,
+            )
+            emotion_dropdown = gr.Dropdown(
+                label="Selecciona una emoción",
+                choices=["Feliz", "Triste", "Sorprendido", "Enojado", "Regular"],
+                interactive=True,
+            )
+            text_mark_dropdown = gr.Dropdown(
+                label="Selecciona una marca de texto",
+                choices=["Velocidad +", "Velocidad -", "Grave", "Agudo", "Silencio"],
+                interactive=True,
+            )
+            add_to_text_button = gr.Button("Agregar al Texto")
+
+            # Salida del texto modificado
+            updated_transcription = gr.Textbox(label="Texto Modificado", interactive=False, lines=5)
+
+        add_to_text_button.click(
+            modify_text,
+            inputs=[transcription, emotion_dropdown, text_mark_dropdown],
+            outputs=updated_transcription,
+        )
+
+    return phase4_container
+
+def phase5():
+    def run_inference(ref_audio, ref_text, gen_text, remove_silence):
+        """Ejecuta el proceso de inferencia y clonación de voz."""
+        if not ref_audio or not ref_text or not gen_text:
+            return "Por favor, asegúrate de haber completado las fases previas."
+
+        try:
+            sample_rate, generated_audio = infer(
+                ref_audio,
+                ref_text,
+                gen_text,
+                F5TTS_ema_model,
+                remove_silence,
+            )
+            return (
+                f"Proceso completado. Audio generado exitosamente.",
+                (sample_rate, generated_audio),
+            )
+        except Exception as e:
+            return f"Error durante la inferencia: {e}"
+
+    with gr.Row(visible=False) as phase5_container:
+        gr.Markdown("### Fase 5: Inferencia y Clonación de Voz")
+
+        with gr.Column():
+            remove_silence_checkbox = gr.Checkbox(label="Eliminar silencios durante la inferencia", value=False)
+            start_inference_button = gr.Button("Iniciar Inferencia")
+            progress_message = gr.Textbox(label="Progreso", interactive=False)
+
+            # Salida de audio final
+            generated_audio = gr.Audio(label="Audio Generado", type="numpy", interactive=False)
+
+        start_inference_button.click(
+            run_inference,
+            inputs=[ref_audio, ref_text, gen_text_input_multistyle, remove_silence_checkbox],
+            outputs=[progress_message, generated_audio],
+        )
+
+    return phase5_container
+with gr.Blocks() as app:
+    gr.Markdown(
+        """
+        # Spanish-F5: Clonación de Voz Multi-Estilo
+        Esta herramienta utiliza el modelo F5-TTS para realizar clonación de voz con múltiples estilos y emociones.
+        """
+    )
 
     # Fase 1
-    phase_1.render()
+    phase1_container = phase1()
 
     # Fase 2
-    phase_2.render()
+    phase2_container = phase2()
 
     # Fase 3
-    phase_3.render()
+    phase3_container = phase3()
 
     # Fase 4
-    phase_4.render()
+    phase4_container = phase4()
 
     # Fase 5
-    phase_5.render()
+    phase5_container = phase5()
 
-    def next_phase(current_phase_value):
-        if current_phase_value < 5:
-            return current_phase_value + 1, gr.update(visible=False), gr.update(visible=True)
-        return current_phase_value, gr.update(), gr.update()
+    # Control de transiciones
+    def next_phase(current_phase):
+        """Controla las transiciones entre fases."""
+        if current_phase == 1:
+            return (
+                gr.update(visible=False),
+                gr.update(visible=True),
+                "Fase 2: Subida o grabación de referencia activa.",
+            )
+        elif current_phase == 2:
+            return (
+                gr.update(visible=False),
+                gr.update(visible=True),
+                "Fase 3: Configuración de tipos de habla activa.",
+            )
+        elif current_phase == 3:
+            return (
+                gr.update(visible=False),
+                gr.update(visible=True),
+                "Fase 4: Modificación del texto transcrito activa.",
+            )
+        elif current_phase == 4:
+            return (
+                gr.update(visible=False),
+                gr.update(visible=True),
+                "Fase 5: Proceso de inferencia activo.",
+            )
+        else:
+            return (
+                gr.update(),
+                gr.update(),
+                "Error: No se pudo determinar la fase actual.",
+            )
 
-    # Botones para avanzar entre fases
-    next_btn = gr.Button("Siguiente Fase")
-    current_phase.change(
+    # Botón de transición
+    transition_button = gr.Button("Siguiente Fase")
+    current_phase = gr.State(value=1)
+    transition_message = gr.Textbox(label="Estado", interactive=False)
+
+    transition_button.click(
         next_phase,
-        inputs=current_phase,
-        outputs=[current_phase, phase_1, phase_2, phase_3, phase_4, phase_5]
+        inputs=[current_phase],
+        outputs=[
+            phase1_container,
+            phase2_container,
+            transition_message,
+        ],
     )
 @click.command()
-@click.option("--port", "-p", default=None, type=int, help="Puerto para ejecutar la aplicación")
-@click.option("--host", "-H", default=None, help="Host para ejecutar la aplicación (por defecto: localhost)")
-@click.option(
-    "--share",
-    "-s",
-    default=True,  # Siempre habilitar la opción de compartir
-    is_flag=True,
-    help="Compartir la aplicación a través de un enlace público de Gradio",
-)
-@click.option("--api", "-a", default=True, is_flag=True, help="Permitir acceso a la API de la aplicación")
+@click.option("--port", "-p", default=7860, type=int, help="Puerto para ejecutar la aplicación")
+@click.option("--host", "-H", default="0.0.0.0", help="Host para ejecutar la aplicación")
+@click.option("--share", "-s", default=True, is_flag=True, help="Siempre habilitar el enlace live (Gradio public URL).")
+@click.option("--api", "-a", default=True, is_flag=True, help="Permitir acceso a la API")
 def main(port, host, share, api):
     """
-    Ejecuta la aplicación en modo live, asegurando que esté accesible a través de un enlace público.
+    Inicia la aplicación Spanish-F5 con Gradio.
     """
-    print("Iniciando la aplicación...")
+    print("Iniciando la aplicación Spanish-F5...")
     app.queue(api_open=api).launch(
-        server_name=host or "0.0.0.0",  # Escuchar en todas las interfaces por defecto
-        server_port=port or 7860,  # Usar el puerto 7860 si no se especifica uno
-        share=share,  # Compartir el enlace públicamente
-        show_api=api,  # Mostrar documentación interactiva de la API
+        server_name=host,
+        server_port=port,
+        share=share,  # Siempre habilitar el enlace live
+        show_api=api,
     )
 
 

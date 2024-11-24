@@ -59,7 +59,6 @@ def traducir_numero_a_texto(texto):
 
     texto_traducido = re.sub(r'\b\d+\b', reemplazar_numero, texto_separado)
     return texto_traducido
-# Función principal de inferencia
 @gpu_decorator
 def infer(
     ref_audio_orig, ref_text, gen_text, model, remove_silence, cross_fade_duration=0.15, speed=1, show_info=gr.Info
@@ -104,7 +103,6 @@ def infer(
         save_spectrogram(combined_spectrogram, spectrogram_path)
 
     return (final_sample_rate, final_wave), spectrogram_path
-# Fase 1: Subida de Audio Inicial
 def phase1():
     def accept_audio(audio_path):
         """Acepta el audio y avanza a la siguiente fase."""
@@ -117,7 +115,7 @@ def phase1():
         """Reinicia la fase 1."""
         return "Por favor, sube un audio para continuar.", gr.update(visible=True), gr.update(visible=False)
 
-    with gr.Blocks() as phase1_app:
+    with gr.Row(visible=True) as phase1_container:
         gr.Markdown("### Fase 1: Subida de Audio Inicial")
         uploaded_audio = gr.Audio(label="Sube un audio generado por TTS cualquiera", type="filepath")
         accept_button = gr.Button("Aceptar")
@@ -137,9 +135,7 @@ def phase1():
             outputs=[status_message, gr.update(visible=True), gr.update(visible=False)],
         )
 
-    return phase1_app
-
-# Fase 2: Subida o grabación de audio de referencia
+    return phase1_container
 def phase2():
     def accept_reference(audio_path, ref_text):
         """Acepta el audio de referencia y el texto, avanzando a la siguiente fase."""
@@ -176,7 +172,6 @@ def phase2():
         )
 
     return phase2_container
-# Fase 3: Configuración de Tipos de Habla
 def phase3():
     def add_emotion(emotion_name, emotion_audio):
         """Agrega un nuevo tipo de habla."""
@@ -202,7 +197,6 @@ def phase3():
         delete_button.click(delete_emotion, inputs=[emotion_name], outputs=[status_message])
 
     return phase3_container
-# Fase 4: Modificación del Texto Transcrito
 def phase4():
     def modify_text(transcription, emotion_name, text_mark):
         """Modifica el texto transcrito con emociones o marcas de texto."""
@@ -239,7 +233,6 @@ def phase4():
         )
 
     return phase4_container
-# Fase 5: Inferencia y Clonación de Voz
 def phase5():
     def run_inference(ref_audio, ref_text, gen_text, remove_silence):
         """Ejecuta el proceso de inferencia y genera el audio clonado."""
@@ -280,7 +273,6 @@ def phase5():
         )
 
     return phase5_container
-# Control de transiciones entre fases
 def next_phase(current_phase):
     """Controla las transiciones entre las fases."""
     if current_phase == 1:
@@ -318,9 +310,6 @@ def next_phase(current_phase):
             "Error: No se pudo determinar la fase actual.",
             current_phase,
         )
-
-
-# Construcción de la aplicación con Gradio
 with gr.Blocks() as app:
     gr.Markdown(
         """
@@ -346,14 +335,9 @@ with gr.Blocks() as app:
     transition_button.click(
         next_phase,
         inputs=[current_phase],
-        outputs=[
-            phase1_container,
-            phase2_container,
-            transition_message,
-            current_phase,
-        ],
+        outputs=[phase1_container, phase2_container, transition_message, current_phase],
     )
-# Configuración para ejecución en Gradio
+
 @click.command()
 @click.option("--port", "-p", default=7860, type=int, help="Puerto para ejecutar la aplicación")
 @click.option("--host", "-H", default="0.0.0.0", help="Host para ejecutar la aplicación")

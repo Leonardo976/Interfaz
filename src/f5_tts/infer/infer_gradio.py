@@ -35,6 +35,10 @@ from f5_tts.infer.utils_infer import (
     save_spectrogram,
 )
 
+# Solución para advertencias de CUDA
+import os
+os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"  # Silenciar logs de TensorFlow
+
 # Cargar vocoder y modelo preentrenado
 vocoder = load_vocoder()
 F5TTS_model_cfg = dict(dim=1024, depth=22, heads=16, ff_mult=2, text_dim=512, conv_layers=4)
@@ -46,17 +50,16 @@ F5TTS_ema_model = load_model(
 chat_model_state = None
 chat_tokenizer_state = None
 
-
 # Función para traducir números a texto en español
 def traducir_numero_a_texto(texto):
-    texto_separado = re.sub(r'([A-Za-z])(\d)', r'\1 \2', texto)
-    texto_separado = re.sub(r'(\d)([A-Za-z])', r'\1 \2', texto_separado)
+    texto_separado = re.sub(r"([A-Za-z])(\d)", r"\1 \2", texto)
+    texto_separado = re.sub(r"(\d)([A-Za-z])", r"\1 \2", texto_separado)
 
     def reemplazar_numero(match):
         numero = match.group()
         return num2words(int(numero), lang="es")
 
-    texto_traducido = re.sub(r'\b\d+\b', reemplazar_numero, texto_separado)
+    texto_traducido = re.sub(r"\b\d+\b", reemplazar_numero, texto_separado)
     return texto_traducido
 
 
@@ -114,13 +117,13 @@ def phase1():
         if audio_path:
             return "Audio aceptado. Avanzando a la Fase 2.", gr.update(visible=False), gr.update(visible=True)
         else:
-            return "Por favor, sube un audio válido.", gr.update(), gr.update()
+            return "Por favor, sube un audio válido.", gr.update(visible=True), gr.update(visible=False)
 
     def cancel_audio():
         """Reinicia la fase 1."""
         return "Por favor, sube un audio para continuar.", gr.update(visible=True), gr.update(visible=False)
 
-    with gr.Blocks() as phase1_app:
+    with gr.Row(visible=True) as phase1_container:
         gr.Markdown("### Fase 1: Subida de Audio Inicial")
         uploaded_audio = gr.Audio(label="Sube un audio generado por TTS cualquiera", type="filepath")
         accept_button = gr.Button("Aceptar")
@@ -140,16 +143,15 @@ def phase1():
             outputs=[status_message, gr.update(visible=True), gr.update(visible=False)],
         )
 
-    return phase1_app
-
-# Fase 2: Subida o grabación de referencia
+    return phase1_container
+# Fase 2: Subida o grabación de audio de referencia
 def phase2():
     def accept_reference(audio_path, ref_text):
         """Acepta el audio de referencia y el texto, avanzando a la siguiente fase."""
         if audio_path and ref_text:
             return "Audio y texto aceptados. Avanzando a la Fase 3.", gr.update(visible=False), gr.update(visible=True)
         else:
-            return "Por favor, sube un audio de referencia y texto válidos.", gr.update(), gr.update()
+            return "Por favor, sube un audio de referencia y texto válidos.", gr.update(visible=True), gr.update(visible=False)
 
     def cancel_reference():
         """Reinicia la fase 2."""
@@ -248,7 +250,7 @@ def phase4():
     return phase4_container
 
 
-# Fase 5: Inferencia y clonación de voz
+# Fase 5: Proceso de inferencia
 def phase5():
     def run_inference(ref_audio, ref_text, gen_text, remove_silence):
         """Ejecuta el proceso de inferencia y genera el audio clonado."""
@@ -289,9 +291,7 @@ def phase5():
         )
 
     return phase5_container
-
-
-# Controlador de transiciones entre fases
+# Control de transiciones entre fases
 def next_phase(current_phase):
     """Controla las transiciones entre las fases."""
     if current_phase == 1:
@@ -331,7 +331,7 @@ def next_phase(current_phase):
         )
 
 
-# Construcción de la interfaz con todas las fases
+# Construcción de la aplicación con Gradio
 with gr.Blocks() as app:
     gr.Markdown(
         """
@@ -366,7 +366,7 @@ with gr.Blocks() as app:
     )
 
 
-# Configuración del servidor y ejecución
+# Configuración para ejecución en Gradio
 @click.command()
 @click.option("--port", "-p", default=7860, type=int, help="Puerto para ejecutar la aplicación")
 @click.option("--host", "-H", default="0.0.0.0", help="Host para ejecutar la aplicación")
@@ -387,5 +387,3 @@ def main(port, host, share, api):
 
 if __name__ == "__main__":
     main()
-
-

@@ -45,6 +45,8 @@ F5TTS_ema_model = load_model(
 # Variables iniciales
 chat_model_state = None
 chat_tokenizer_state = None
+
+
 # Función para traducir números a texto en español
 def traducir_numero_a_texto(texto):
     texto_separado = re.sub(r'([A-Za-z])(\d)', r'\1 \2', texto)
@@ -103,6 +105,9 @@ def infer(
         save_spectrogram(combined_spectrogram, spectrogram_path)
 
     return (final_sample_rate, final_wave), spectrogram_path
+
+
+# Fase 1: Subida de audio inicial
 def phase1():
     def accept_audio(audio_path):
         """Acepta el audio y avanza a la siguiente fase."""
@@ -136,6 +141,8 @@ def phase1():
         )
 
     return phase1_app
+
+# Fase 2: Subida o grabación de referencia
 def phase2():
     def accept_reference(audio_path, ref_text):
         """Acepta el audio de referencia y el texto, avanzando a la siguiente fase."""
@@ -172,6 +179,9 @@ def phase2():
         )
 
     return phase2_container
+
+
+# Fase 3: Configuración de tipos de habla
 def phase3():
     def add_emotion(emotion_name, emotion_audio):
         """Agrega un nuevo tipo de habla."""
@@ -197,6 +207,9 @@ def phase3():
         delete_button.click(delete_emotion, inputs=[emotion_name], outputs=[status_message])
 
     return phase3_container
+
+
+# Fase 4: Modificación del texto transcrito
 def phase4():
     def modify_text(transcription, emotion_name, text_mark):
         """Modifica el texto transcrito con emociones o marcas de texto."""
@@ -233,6 +246,9 @@ def phase4():
         )
 
     return phase4_container
+
+
+# Fase 5: Inferencia y clonación de voz
 def phase5():
     def run_inference(ref_audio, ref_text, gen_text, remove_silence):
         """Ejecuta el proceso de inferencia y genera el audio clonado."""
@@ -273,6 +289,9 @@ def phase5():
         )
 
     return phase5_container
+
+
+# Controlador de transiciones entre fases
 def next_phase(current_phase):
     """Controla las transiciones entre las fases."""
     if current_phase == 1:
@@ -310,6 +329,9 @@ def next_phase(current_phase):
             "Error: No se pudo determinar la fase actual.",
             current_phase,
         )
+
+
+# Construcción de la interfaz con todas las fases
 with gr.Blocks() as app:
     gr.Markdown(
         """
@@ -342,6 +364,9 @@ with gr.Blocks() as app:
             current_phase,
         ],
     )
+
+
+# Configuración del servidor y ejecución
 @click.command()
 @click.option("--port", "-p", default=7860, type=int, help="Puerto para ejecutar la aplicación")
 @click.option("--host", "-H", default="0.0.0.0", help="Host para ejecutar la aplicación")
@@ -362,3 +387,5 @@ def main(port, host, share, api):
 
 if __name__ == "__main__":
     main()
+
+

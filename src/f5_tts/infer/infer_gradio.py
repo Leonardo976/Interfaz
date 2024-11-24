@@ -1,3 +1,4 @@
+import os
 import re
 import tempfile
 import click
@@ -9,20 +10,21 @@ from cached_path import cached_path
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from num2words import num2words
 
+# Solución al problema de registro duplicado de CUDA
+os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"  # Silencia logs innecesarios
+os.environ["XLA_PYTHON_CLIENT_MEM_FRACTION"] = ".85"  # Limita uso de memoria XLA para evitar conflictos
+
 try:
     import spaces
-
     USING_SPACES = True
 except ImportError:
     USING_SPACES = False
-
 
 def gpu_decorator(func):
     if USING_SPACES:
         return spaces.GPU(func)
     else:
         return func
-
 
 # Importaciones del modelo F5-TTS y utilidades
 from f5_tts.model import DiT, UNetT
@@ -34,10 +36,6 @@ from f5_tts.infer.utils_infer import (
     remove_silence_for_generated_wav,
     save_spectrogram,
 )
-
-# Solución para advertencias de CUDA
-import os
-os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"  # Silenciar logs de TensorFlow
 
 # Cargar vocoder y modelo preentrenado
 vocoder = load_vocoder()
@@ -52,17 +50,15 @@ chat_tokenizer_state = None
 
 # Función para traducir números a texto en español
 def traducir_numero_a_texto(texto):
-    texto_separado = re.sub(r"([A-Za-z])(\d)", r"\1 \2", texto)
-    texto_separado = re.sub(r"(\d)([A-Za-z])", r"\1 \2", texto_separado)
+    texto_separado = re.sub(r'([A-Za-z])(\d)', r'\1 \2', texto)
+    texto_separado = re.sub(r'(\d)([A-Za-z])', r'\1 \2', texto_separado)
 
     def reemplazar_numero(match):
         numero = match.group()
         return num2words(int(numero), lang="es")
 
-    texto_traducido = re.sub(r"\b\d+\b", reemplazar_numero, texto_separado)
+    texto_traducido = re.sub(r'\b\d+\b', reemplazar_numero, texto_separado)
     return texto_traducido
-
-
 # Función principal de inferencia
 @gpu_decorator
 def infer(
@@ -108,22 +104,20 @@ def infer(
         save_spectrogram(combined_spectrogram, spectrogram_path)
 
     return (final_sample_rate, final_wave), spectrogram_path
-
-
-# Fase 1: Subida de audio inicial
+# Fase 1: Subida de Audio Inicial
 def phase1():
     def accept_audio(audio_path):
         """Acepta el audio y avanza a la siguiente fase."""
         if audio_path:
             return "Audio aceptado. Avanzando a la Fase 2.", gr.update(visible=False), gr.update(visible=True)
         else:
-            return "Por favor, sube un audio válido.", gr.update(visible=True), gr.update(visible=False)
+            return "Por favor, sube un audio válido.", gr.update(), gr.update()
 
     def cancel_audio():
         """Reinicia la fase 1."""
         return "Por favor, sube un audio para continuar.", gr.update(visible=True), gr.update(visible=False)
 
-    with gr.Row(visible=True) as phase1_container:
+    with gr.Blocks() as phase1_app:
         gr.Markdown("### Fase 1: Subida de Audio Inicial")
         uploaded_audio = gr.Audio(label="Sube un audio generado por TTS cualquiera", type="filepath")
         accept_button = gr.Button("Aceptar")
@@ -143,7 +137,8 @@ def phase1():
             outputs=[status_message, gr.update(visible=True), gr.update(visible=False)],
         )
 
-    return phase1_container
+    return phase1_app
+
 # Fase 2: Subida o grabación de audio de referencia
 def phase2():
     def accept_reference(audio_path, ref_text):
@@ -151,7 +146,7 @@ def phase2():
         if audio_path and ref_text:
             return "Audio y texto aceptados. Avanzando a la Fase 3.", gr.update(visible=False), gr.update(visible=True)
         else:
-            return "Por favor, sube un audio de referencia y texto válidos.", gr.update(visible=True), gr.update(visible=False)
+            return "Por favor, sube un audio de referencia y texto válidos.", gr.update(), gr.update()
 
     def cancel_reference():
         """Reinicia la fase 2."""
@@ -181,9 +176,7 @@ def phase2():
         )
 
     return phase2_container
-
-
-# Fase 3: Configuración de tipos de habla
+# Fase 3: Configuración de Tipos de Habla
 def phase3():
     def add_emotion(emotion_name, emotion_audio):
         """Agrega un nuevo tipo de habla."""
@@ -209,9 +202,7 @@ def phase3():
         delete_button.click(delete_emotion, inputs=[emotion_name], outputs=[status_message])
 
     return phase3_container
-
-
-# Fase 4: Modificación del texto transcrito
+# Fase 4: Modificación del Texto Transcrito
 def phase4():
     def modify_text(transcription, emotion_name, text_mark):
         """Modifica el texto transcrito con emociones o marcas de texto."""
@@ -248,9 +239,7 @@ def phase4():
         )
 
     return phase4_container
-
-
-# Fase 5: Proceso de inferencia
+# Fase 5: Inferencia y Clonación de Voz
 def phase5():
     def run_inference(ref_audio, ref_text, gen_text, remove_silence):
         """Ejecuta el proceso de inferencia y genera el audio clonado."""
@@ -364,8 +353,6 @@ with gr.Blocks() as app:
             current_phase,
         ],
     )
-
-
 # Configuración para ejecución en Gradio
 @click.command()
 @click.option("--port", "-p", default=7860, type=int, help="Puerto para ejecutar la aplicación")

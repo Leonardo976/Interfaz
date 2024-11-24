@@ -44,10 +44,6 @@ F5TTS_ema_model = load_model(
     DiT, F5TTS_model_cfg, str(cached_path("hf://jpgallegoar/F5-Spanish/model_1200000.safetensors"))
 )
 
-# Variables iniciales
-chat_model_state = None
-chat_tokenizer_state = None
-
 # Función para traducir números a texto en español
 def traducir_numero_a_texto(texto):
     texto_separado = re.sub(r'([A-Za-z])(\d)', r'\1 \2', texto)
@@ -59,6 +55,8 @@ def traducir_numero_a_texto(texto):
 
     texto_traducido = re.sub(r'\b\d+\b', reemplazar_numero, texto_separado)
     return texto_traducido
+
+# Función principal de inferencia
 @gpu_decorator
 def infer(
     ref_audio_orig, ref_text, gen_text, model, remove_silence, cross_fade_duration=0.15, speed=1, show_info=gr.Info
@@ -103,17 +101,19 @@ def infer(
         save_spectrogram(combined_spectrogram, spectrogram_path)
 
     return (final_sample_rate, final_wave), spectrogram_path
+
+# Fase 1: Subida de Audio Inicial
 def phase1():
     def accept_audio(audio_path):
         """Acepta el audio y avanza a la siguiente fase."""
         if audio_path:
             return "Audio aceptado. Avanzando a la Fase 2.", gr.update(visible=False), gr.update(visible=True)
         else:
-            return "Por favor, sube un audio válido.", gr.update(), gr.update()
+            return "Por favor, sube un audio válido.", gr.Textbox.update(), gr.Row.update()
 
     def cancel_audio():
         """Reinicia la fase 1."""
-        return "Por favor, sube un audio para continuar.", gr.update(visible=True), gr.update(visible=False)
+        return "Por favor, sube un audio para continuar.", gr.Row.update(visible=True), gr.Row.update(visible=False)
 
     with gr.Row(visible=True) as phase1_container:
         gr.Markdown("### Fase 1: Subida de Audio Inicial")
@@ -126,27 +126,29 @@ def phase1():
         accept_button.click(
             accept_audio,
             inputs=[uploaded_audio],
-            outputs=[status_message, gr.update(visible=False), gr.update(visible=True)],
+            outputs=[status_message, phase1_container, gr.Row(visible=True)],
         )
 
         cancel_button.click(
             cancel_audio,
             inputs=[],
-            outputs=[status_message, gr.update(visible=True), gr.update(visible=False)],
+            outputs=[status_message, phase1_container, gr.Row(visible=False)],
         )
 
     return phase1_container
+
+# Fase 2: Subida o grabación de audio de referencia
 def phase2():
     def accept_reference(audio_path, ref_text):
         """Acepta el audio de referencia y el texto, avanzando a la siguiente fase."""
         if audio_path and ref_text:
             return "Audio y texto aceptados. Avanzando a la Fase 3.", gr.update(visible=False), gr.update(visible=True)
         else:
-            return "Por favor, sube un audio de referencia y texto válidos.", gr.update(), gr.update()
+            return "Por favor, sube un audio de referencia y texto válidos.", gr.Textbox.update(), gr.Row.update()
 
     def cancel_reference():
         """Reinicia la fase 2."""
-        return "Sube un audio de referencia y texto válidos para continuar.", gr.update(visible=True), gr.update(visible=False)
+        return "Sube un audio de referencia y texto válidos para continuar.", gr.Row.update(visible=True), gr.Row.update(visible=False)
 
     with gr.Row(visible=False) as phase2_container:
         gr.Markdown("### Fase 2: Subida de Referencia")
@@ -163,27 +165,29 @@ def phase2():
         accept_ref_button.click(
             accept_reference,
             inputs=[ref_audio, ref_text],
-            outputs=[status_message, gr.update(visible=False), gr.update(visible=True)],
+            outputs=[status_message, phase2_container, gr.Row(visible=True)],
         )
         cancel_ref_button.click(
             cancel_reference,
             inputs=[],
-            outputs=[status_message, gr.update(visible=True), gr.update(visible=False)],
+            outputs=[status_message, phase2_container, gr.Row(visible=False)],
         )
 
     return phase2_container
+
+# Fase 3: Configuración de Tipos de Habla
 def phase3():
     def add_emotion(emotion_name, emotion_audio):
         """Agrega un nuevo tipo de habla."""
         if emotion_name and emotion_audio:
-            return f"Tipo de habla '{emotion_name}' agregado.", gr.update()
-        return "Error: Proporciona un nombre y audio válidos.", gr.update()
+            return f"Tipo de habla '{emotion_name}' agregado.", gr.Textbox.update()
+        return "Error: Proporciona un nombre y audio válidos.", gr.Textbox.update()
 
     def delete_emotion(emotion_name):
         """Elimina un tipo de habla existente."""
         if emotion_name:
-            return f"Tipo de habla '{emotion_name}' eliminado.", gr.update()
-        return "Error: Selecciona un tipo de habla para eliminar.", gr.update()
+            return f"Tipo de habla '{emotion_name}' eliminado.", gr.Textbox.update()
+        return "Error: Selecciona un tipo de habla para eliminar.", gr.Textbox.update()
 
     with gr.Row(visible=False) as phase3_container:
         gr.Markdown("### Fase 3: Configuración de Tipos de Habla")
@@ -197,6 +201,7 @@ def phase3():
         delete_button.click(delete_emotion, inputs=[emotion_name], outputs=[status_message])
 
     return phase3_container
+# Fase 4: Modificación del Texto Transcrito
 def phase4():
     def modify_text(transcription, emotion_name, text_mark):
         """Modifica el texto transcrito con emociones o marcas de texto."""
@@ -206,7 +211,7 @@ def phase4():
             updated_text = transcription + f"{{{text_mark}}} "
         else:
             updated_text = transcription
-        return updated_text
+        return gr.Textbox.update(value=updated_text)
 
     with gr.Row(visible=False) as phase4_container:
         gr.Markdown("### Fase 4: Modificación del Texto Transcrito")
@@ -233,11 +238,17 @@ def phase4():
         )
 
     return phase4_container
+
+# Fase 5: Inferencia y Clonación de Voz
 def phase5():
     def run_inference(ref_audio, ref_text, gen_text, remove_silence):
         """Ejecuta el proceso de inferencia y genera el audio clonado."""
         if not ref_audio or not ref_text or not gen_text:
-            return "Error: Completa todas las fases previas antes de continuar.", None
+            return (
+                "Error: Completa todas las fases previas antes de continuar.",
+                None,
+                None,
+            )
 
         try:
             # Llamada a la función de inferencia definida anteriormente
@@ -273,6 +284,8 @@ def phase5():
         )
 
     return phase5_container
+
+# Control de transiciones entre fases
 def next_phase(current_phase):
     """Controla las transiciones entre las fases."""
     if current_phase == 1:
@@ -310,6 +323,8 @@ def next_phase(current_phase):
             "Error: No se pudo determinar la fase actual.",
             current_phase,
         )
+
+# Construcción de la aplicación con Gradio
 with gr.Blocks() as app:
     gr.Markdown(
         """
@@ -335,9 +350,15 @@ with gr.Blocks() as app:
     transition_button.click(
         next_phase,
         inputs=[current_phase],
-        outputs=[phase1_container, phase2_container, transition_message, current_phase],
+        outputs=[
+            phase1_container,
+            phase2_container,
+            transition_message,
+            current_phase,
+        ],
     )
 
+# Configuración para ejecución en Gradio
 @click.command()
 @click.option("--port", "-p", default=7860, type=int, help="Puerto para ejecutar la aplicación")
 @click.option("--host", "-H", default="0.0.0.0", help="Host para ejecutar la aplicación")

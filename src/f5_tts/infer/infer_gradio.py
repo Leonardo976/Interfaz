@@ -1,18 +1,16 @@
-import os
+from flask import Flask, request, jsonify, send_file
+from flask_cors import CORS
 import re
 import tempfile
-import click
-import gradio as gr
 import numpy as np
 import soundfile as sf
 import torchaudio
 from cached_path import cached_path
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from num2words import num2words
-
-# Solución al problema de registro duplicado de CUDA
-os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"  # Silencia logs innecesarios
-os.environ["XLA_PYTHON_CLIENT_MEM_FRACTION"] = ".85"  # Limita uso de memoria XLA para evitar conflictos
+import os
+import json
+from werkzeug.utils import secure_filename
 
 try:
     import spaces
@@ -20,13 +18,7 @@ try:
 except ImportError:
     USING_SPACES = False
 
-def gpu_decorator(func):
-    if USING_SPACES:
-        return spaces.GPU(func)
-    else:
-        return func
-
-# Importaciones del modelo F5-TTS y utilidades
+# Importar módulos específicos de TTS
 from f5_tts.model import DiT, UNetT
 from f5_tts.infer.utils_infer import (
     load_vocoder,
@@ -37,287 +29,402 @@ from f5_tts.infer.utils_infer import (
     save_spectrogram,
 )
 
-# Cargar vocoder y modelo preentrenado
+app = Flask(__name__)
+CORS(app)
+
+# Agregar estas líneas para permitir archivos grandes
+app.config['MAX_CONTENT_LENGTH'] = None  # Elimina el límite de tamaño
+app.config['MAX_CONTENT_PATH'] = None    # Elimina el límite de ruta
+
+# Configurar carpeta de subidas
+UPLOAD_FOLDER = 'temp_uploads'
+SPEECH_TYPES_FILE = 'speech_types.json'
+if not os.path.exists(UPLOAD_FOLDER):
+    os.makedirs(UPLOAD_FOLDER)
+app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
+
+# Inicializar modelos
 vocoder = load_vocoder()
 F5TTS_model_cfg = dict(dim=1024, depth=22, heads=16, ff_mult=2, text_dim=512, conv_layers=4)
 F5TTS_ema_model = load_model(
-    DiT, F5TTS_model_cfg, str(cached_path("hf://jpgallegoar/F5-Spanish/model_1200000.safetensors"))
+    DiT, 
+    F5TTS_model_cfg, 
+    str(cached_path("hf://jpgallegoar/F5-Spanish/model_1200000.safetensors"))
 )
 
-# Variables iniciales
 chat_model_state = None
 chat_tokenizer_state = None
 
-# Función para traducir números a texto en español
+# Diccionario global para almacenar los tipos de habla
+speech_types_dict = {}
+
+def save_speech_types():
+    """Guardar tipos de habla en archivo JSON"""
+    try:
+        with open(SPEECH_TYPES_FILE, 'w', encoding='utf-8') as f:
+            json.dump(speech_types_dict, f, ensure_ascii=False, indent=4)
+        print(f"Archivo JSON guardado exitosamente: {SPEECH_TYPES_FILE}")
+    except Exception as e:
+        print(f"Error al guardar archivo JSON: {str(e)}")
+        raise
+
+def load_speech_types():
+    """Cargar tipos de habla desde archivo JSON"""
+    global speech_types_dict
+    try:
+        if os.path.exists(SPEECH_TYPES_FILE):
+            with open(SPEECH_TYPES_FILE, 'r', encoding='utf-8') as f:
+                speech_types_dict = json.load(f)
+            print(f"Tipos de habla cargados: {speech_types_dict}")
+        else:
+            speech_types_dict = {}
+            print("No existe archivo de tipos de habla, se iniciará uno nuevo")
+    except Exception as e:
+        print(f"Error al cargar tipos de habla: {str(e)}")
+        speech_types_dict = {}
+
+def gpu_decorator(func):
+    if USING_SPACES:
+        return spaces.GPU(func)
+    else:
+        return func
+
+def generate_response(messages, model, tokenizer):
+    """Generar respuesta usando Qwen"""
+    text = tokenizer.apply_chat_template(
+        messages,
+        tokenize=False,
+        add_generation_prompt=True,
+    )
+
+    model_inputs = tokenizer([text], return_tensors="pt").to(model.device)
+    generated_ids = model.generate(
+        **model_inputs,
+        max_new_tokens=512,
+        temperature=0.7,
+        top_p=0.95,
+    )
+
+    generated_ids = [
+        output_ids[len(input_ids):] for input_ids, output_ids in zip(model_inputs.input_ids, generated_ids)
+    ]
+    return tokenizer.batch_decode(generated_ids, skip_special_tokens=True)[0]
+
 def traducir_numero_a_texto(texto):
+    """Traducir números a texto en español"""
     texto_separado = re.sub(r'([A-Za-z])(\d)', r'\1 \2', texto)
     texto_separado = re.sub(r'(\d)([A-Za-z])', r'\1 \2', texto_separado)
-
+    
     def reemplazar_numero(match):
         numero = match.group()
-        return num2words(int(numero), lang="es")
+        return num2words(int(numero), lang='es')
 
     texto_traducido = re.sub(r'\b\d+\b', reemplazar_numero, texto_separado)
     return texto_traducido
-# Fase 1: Subida de Audio Inicial
-def phase1():
-    def accept_audio(audio_path):
-        """Acepta el audio y avanza a la siguiente fase."""
-        if audio_path:
-            return "Audio aceptado. Avanzando a la Fase 2.", gr.update(visible=False), gr.update(visible=True)
+
+@gpu_decorator
+def infer(ref_audio_orig, ref_text, gen_text, model, remove_silence, cross_fade_duration=0.15, speed=1):
+    """Función principal de inferencia para generación TTS"""
+    try:
+        ref_audio, ref_text = preprocess_ref_audio_text(ref_audio_orig, ref_text)
+
+        if not gen_text.startswith(" "):
+            gen_text = " " + gen_text
+        if not gen_text.endswith(". "):
+            gen_text += ". "
+
+        gen_text = gen_text.lower()
+        gen_text = traducir_numero_a_texto(gen_text)
+
+        final_wave, final_sample_rate, combined_spectrogram = infer_process(
+            ref_audio,
+            ref_text,
+            gen_text,
+            F5TTS_ema_model,
+            vocoder,
+            cross_fade_duration=cross_fade_duration,
+            speed=speed
+        )
+
+        if remove_silence:
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as f:
+                sf.write(f.name, final_wave, final_sample_rate)
+                remove_silence_for_generated_wav(f.name)
+                final_wave, _ = torchaudio.load(f.name)
+            final_wave = final_wave.squeeze().cpu().numpy()
+
+        # Guardar espectrograma
+        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp_spectrogram:
+            spectrogram_path = tmp_spectrogram.name
+            save_spectrogram(combined_spectrogram, spectrogram_path)
+
+        return (final_sample_rate, final_wave), spectrogram_path
+    except Exception as e:
+        print(f"Error en infer: {str(e)}")
+        raise
+
+def parse_speechtypes_text(gen_text):
+    """Analizar texto con anotaciones de tipo de habla"""
+    pattern = r"\{(.*?)\}"
+    tokens = re.split(pattern, gen_text)
+    segments = []
+    current_style = "Regular"
+
+    for i in range(len(tokens)):
+        if i % 2 == 0:
+            text = tokens[i].strip()
+            if text:
+                segments.append({"style": current_style, "text": text})
         else:
-            return "Por favor, sube un audio válido.", gr.update(), gr.update()
+            current_style = tokens[i].strip()
 
-    def cancel_audio():
-        """Reinicia la fase 1."""
-        return "Por favor, sube un audio para continuar.", gr.update(visible=True), gr.update(visible=False)
+    return segments
 
-    with gr.Blocks() as phase1_app:
-        gr.Markdown("### Fase 1: Subida de Audio Inicial")
-        uploaded_audio = gr.Audio(label="Sube un audio generado por TTS cualquiera", type="filepath")
-        accept_button = gr.Button("Aceptar")
-        cancel_button = gr.Button("Cancelar")
-        status_message = gr.Textbox(label="Estado", value="Sube un audio válido para continuar.", interactive=False)
+def allowed_file(filename):
+    """Verificar si la extensión del archivo está permitida"""
+    ALLOWED_EXTENSIONS = {'wav', 'mp3', 'ogg', 'm4a', 'WAV', 'MP3', 'OGG', 'M4A'}
+    return '.' in filename and filename.rsplit('.', 1)[1].upper() in ALLOWED_EXTENSIONS
 
-        # Acciones de los botones
-        accept_button.click(
-            accept_audio,
-            inputs=[uploaded_audio],
-            outputs=[status_message, gr.update(visible=False), gr.update(visible=True)],
-        )
+@app.route('/api/upload_audio', methods=['POST'])
+def upload_audio():
+    """Manejar subidas de archivos de audio"""
+    try:
+        # Imprimir todo el contenido del request para debug
+        print("Form data recibida:", request.form.to_dict())
+        print("Files recibidos:", request.files.keys())
 
-        cancel_button.click(
-            cancel_audio,
-            inputs=[],
-            outputs=[status_message, gr.update(visible=True), gr.update(visible=False)],
-        )
-
-    return phase1_app
-# Fase 2: Subida o grabación de audio de referencia
-def phase2():
-    def accept_reference(audio_path, ref_text):
-        """Acepta el audio de referencia y el texto, avanzando a la siguiente fase."""
-        if audio_path and ref_text:
-            return "Audio y texto aceptados. Avanzando a la Fase 3.", gr.update(visible=False), gr.update(visible=True)
-        else:
-            return "Por favor, sube un audio de referencia y texto válidos.", gr.update(), gr.update()
-
-    def cancel_reference():
-        """Reinicia la fase 2."""
-        return "Sube un audio de referencia y texto válidos para continuar.", gr.update(visible=True), gr.update(visible=False)
-
-    with gr.Row(visible=False) as phase2_container:
-        gr.Markdown("### Fase 2: Subida de Referencia")
-        ref_audio = gr.Audio(label="Sube o graba un audio de referencia", type="filepath")
-        ref_text = gr.Textbox(
-            label="Texto de referencia (15 segundos de lectura)",
-            placeholder="Ejemplo: Hola, este es un texto para clonar la voz.",
-        )
-        accept_ref_button = gr.Button("Aceptar")
-        cancel_ref_button = gr.Button("Cancelar")
-        status_message = gr.Textbox(label="Estado", value="", interactive=False)
-
-        # Acciones de los botones
-        accept_ref_button.click(
-            accept_reference,
-            inputs=[ref_audio, ref_text],
-            outputs=[status_message, gr.update(visible=False), gr.update(visible=True)],
-        )
-        cancel_ref_button.click(
-            cancel_reference,
-            inputs=[],
-            outputs=[status_message, gr.update(visible=True), gr.update(visible=False)],
-        )
-
-    return phase2_container
-# Fase 3: Configuración de Tipos de Habla
-def phase3():
-    def add_emotion(emotion_name, emotion_audio):
-        """Agrega un nuevo tipo de habla."""
-        if emotion_name and emotion_audio:
-            return f"Tipo de habla '{emotion_name}' agregado.", gr.update()
-        return "Error: Proporciona un nombre y audio válidos.", gr.update()
-
-    def delete_emotion(emotion_name):
-        """Elimina un tipo de habla existente."""
-        if emotion_name:
-            return f"Tipo de habla '{emotion_name}' eliminado.", gr.update()
-        return "Error: Selecciona un tipo de habla para eliminar.", gr.update()
-
-    with gr.Row(visible=False) as phase3_container:
-        gr.Markdown("### Fase 3: Configuración de Tipos de Habla")
-        emotion_name = gr.Textbox(label="Nombre de la Emoción")
-        emotion_audio = gr.Audio(label="Sube o graba un audio para esta emoción", type="filepath")
-        add_button = gr.Button("Agregar Emoción")
-        delete_button = gr.Button("Eliminar Emoción")
-        status_message = gr.Textbox(label="Estado", value="", interactive=False)
-
-        add_button.click(add_emotion, inputs=[emotion_name, emotion_audio], outputs=[status_message])
-        delete_button.click(delete_emotion, inputs=[emotion_name], outputs=[status_message])
-
-    return phase3_container
-# Fase 4: Modificación del Texto Transcrito
-def phase4():
-    def modify_text(transcription, emotion_name, text_mark):
-        """Modifica el texto transcrito con emociones o marcas de texto."""
-        if transcription and emotion_name:
-            updated_text = transcription + f"{{{emotion_name}}} "
-        elif transcription and text_mark:
-            updated_text = transcription + f"{{{text_mark}}} "
-        else:
-            updated_text = transcription
-        return updated_text
-
-    with gr.Row(visible=False) as phase4_container:
-        gr.Markdown("### Fase 4: Modificación del Texto Transcrito")
-        transcription = gr.Textbox(
-            label="Texto Transcrito",
-            placeholder="Texto transcrito de referencia.",
-            lines=5,
-        )
-        emotion_dropdown = gr.Dropdown(
-            label="Selecciona una emoción",
-            choices=["Feliz", "Triste", "Sorprendido", "Enojado", "Regular"],
-        )
-        text_mark_dropdown = gr.Dropdown(
-            label="Selecciona una marca de texto",
-            choices=["Velocidad +", "Velocidad -", "Grave", "Agudo", "Silencio"],
-        )
-        add_button = gr.Button("Agregar al Texto")
-        updated_transcription = gr.Textbox(label="Texto Modificado", interactive=False, lines=5)
-
-        add_button.click(
-            modify_text,
-            inputs=[transcription, emotion_dropdown, text_mark_dropdown],
-            outputs=updated_transcription,
-        )
-
-    return phase4_container
-# Fase 5: Inferencia y Clonación de Voz
-def phase5():
-    def run_inference(ref_audio, ref_text, gen_text, remove_silence):
-        """Ejecuta el proceso de inferencia y genera el audio clonado."""
-        if not ref_audio or not ref_text or not gen_text:
-            return "Error: Completa todas las fases previas antes de continuar.", None
-
+        if 'audio' not in request.files:
+            print("No se encontró el archivo de audio en la solicitud")
+            return jsonify({'error': 'No se proporcionó archivo de audio'}), 400
+        
+        file = request.files['audio']
+        print(f"Archivo recibido: {file.filename}")
+        
+        # Obtener datos del formulario con valor por defecto
+        speech_type = request.form.get('speechType', 'Regular')  # Valor por defecto 'Regular'
+        ref_text = request.form.get('refText', '')
+        
+        print(f"Tipo de habla: {speech_type}")
+        print(f"Texto de referencia: {ref_text}")
+        
+        if file.filename == '':
+            print("Nombre de archivo vacío")
+            return jsonify({'error': 'No se seleccionó ningún archivo'}), 400
+        
+        if not allowed_file(file.filename):
+            print(f"Tipo de archivo no permitido: {file.filename}")
+            return jsonify({'error': 'Tipo de archivo no permitido'}), 400
+        
+        # Crear directorio si no existe
+        if not os.path.exists(UPLOAD_FOLDER):
+            os.makedirs(UPLOAD_FOLDER)
+        
+        # Generar nombre de archivo único
+        import time
+        timestamp = int(time.time())
+        filename = secure_filename(f"{speech_type}_{timestamp}_{file.filename}")
+        filepath = os.path.join(app.config['UPLOAD_FOLDER'], filename)
+        
+        # Guardar archivo
         try:
-            # Llamada a la función de inferencia definida anteriormente
-            (sample_rate, generated_audio), spectrogram_path = infer(
-                ref_audio,
-                ref_text,
-                gen_text,
-                F5TTS_ema_model,
-                remove_silence,
-            )
-            return (
-                "Proceso de inferencia completado. Revisa el audio generado.",
-                (sample_rate, generated_audio),
-                spectrogram_path,
-            )
+            file.save(filepath)
+            print(f"Archivo guardado en: {filepath}")
         except Exception as e:
-            return f"Error durante la inferencia: {e}", None, None
+            print(f"Error al guardar el archivo: {str(e)}")
+            return jsonify({'error': f'Error al guardar el archivo: {str(e)}'}), 500
+        
+        # Verificar que el archivo se guardó correctamente
+        if not os.path.exists(filepath):
+            print("El archivo no se guardó correctamente")
+            return jsonify({'error': 'Error al guardar el archivo'}), 500
+        
+        # Actualizar el diccionario de tipos de habla
+        try:
+            speech_types_dict[speech_type] = {
+                'audio': filepath,
+                'ref_text': ref_text
+            }
+            print(f"Diccionario actualizado: {speech_types_dict}")
+            
+            # Guardar en el archivo JSON
+            save_speech_types()
+            print("Tipos de habla guardados en JSON")
+            
+        except Exception as e:
+            print(f"Error al actualizar tipos de habla: {str(e)}")
+            return jsonify({'error': f'Error al actualizar tipos de habla: {str(e)}'}), 500
+        
+        return jsonify({
+            'success': True,
+            'filepath': filepath,
+            'speechType': speech_type,
+            'message': f'Tipo de habla {speech_type} guardado correctamente'
+        })
+        
+    except Exception as e:
+        print(f"Error general en upload_audio: {str(e)}")
+        return jsonify({'error': f'Error al procesar la solicitud: {str(e)}'}), 500
 
-    with gr.Row(visible=False) as phase5_container:
-        gr.Markdown("### Fase 5: Inferencia y Clonación de Voz")
-        remove_silence_checkbox = gr.Checkbox(label="Eliminar silencios durante la inferencia", value=False)
-        start_inference_button = gr.Button("Iniciar Inferencia")
-        progress_message = gr.Textbox(label="Progreso", interactive=False)
+@app.route('/api/generate_speech', methods=['POST'])
+def generate_speech():
+    """Generar habla de un solo estilo"""
+    try:
+        data = request.json
+        speech_type = data.get('speechType', 'Regular')
+        
+        if speech_type not in speech_types_dict:
+            return jsonify({'error': f'Tipo de habla no encontrado: {speech_type}'}), 400
+        
+        speech_type_data = speech_types_dict[speech_type]
+        ref_audio = speech_type_data['audio']
+        ref_text = speech_type_data.get('ref_text', '')
+        gen_text = data.get('gen_text')
+        remove_silence = data.get('remove_silence', False)
 
-        # Salida de audio generado y espectrograma
-        generated_audio = gr.Audio(label="Audio Generado", type="numpy", interactive=False)
-        generated_spectrogram = gr.Image(label="Espectrograma Generado", type="filepath", interactive=False)
+        # Verificar archivo de audio
+        if not os.path.exists(ref_audio):
+            return jsonify({'error': f'Archivo de audio no encontrado: {ref_audio}'}), 404
 
-        start_inference_button.click(
-            run_inference,
-            inputs=[None, None, None, remove_silence_checkbox],
-            outputs=[progress_message, generated_audio, generated_spectrogram],
+        # Generar habla
+        audio, spectrogram_path = infer(
+            ref_audio,
+            ref_text,
+            gen_text,
+            "F5-TTS",
+            remove_silence
         )
 
-    return phase5_container
-# Control de transiciones entre fases
-def next_phase(current_phase):
-    """Controla las transiciones entre las fases."""
-    if current_phase == 1:
-        return (
-            gr.update(visible=False),  # Ocultar fase 1
-            gr.update(visible=True),   # Mostrar fase 2
-            "Fase 2: Subida o grabación de referencia activa.",
-            2,                         # Actualizar estado de fase
-        )
-    elif current_phase == 2:
-        return (
-            gr.update(visible=False),
-            gr.update(visible=True),
-            "Fase 3: Configuración de tipos de habla activa.",
-            3,
-        )
-    elif current_phase == 3:
-        return (
-            gr.update(visible=False),
-            gr.update(visible=True),
-            "Fase 4: Modificación del texto transcrito activa.",
-            4,
-        )
-    elif current_phase == 4:
-        return (
-            gr.update(visible=False),
-            gr.update(visible=True),
-            "Fase 5: Proceso de inferencia activo.",
-            5,
-        )
-    else:
-        return (
-            gr.update(visible=True),
-            gr.update(),
-            "Error: No se pudo determinar la fase actual.",
-            current_phase,
-        )
-# Construcción de la aplicación con Gradio
-with gr.Blocks() as app:
-    gr.Markdown(
-        """
-        # Spanish-F5: Clonación de Voz Multi-Estilo
-        Bienvenido a la herramienta de clonación de voz con F5-TTS. Sigue cada fase para configurar el proceso y generar el audio deseado.
-        """
-    )
+        # Guardar audio generado
+        temp_audio_path = tempfile.mktemp(suffix='.wav')
+        sf.write(temp_audio_path, audio[1], audio[0])
 
-    # Contenedores de cada fase
-    phase1_container = phase1()
-    phase2_container = phase2()
-    phase3_container = phase3()
-    phase4_container = phase4()
-    phase5_container = phase5()
+        return jsonify({
+            'audio_path': temp_audio_path,
+            'spectrogram_path': spectrogram_path
+        })
 
-    # Estado actual de la fase
-    current_phase = gr.State(value=1)
+    except Exception as e:
+        return jsonify({'error': f'Error al generar habla: {str(e)}'}), 500
 
-    # Botón de transición entre fases
-    transition_button = gr.Button("Siguiente Fase")
-    transition_message = gr.Textbox(label="Estado", value="Fase 1: Subida de audio inicial activa.", interactive=False)
+@app.route('/api/generate_multistyle_speech', methods=['POST'])
+def generate_multistyle_speech():
+    """Generar habla multi-estilo"""
+    try:
+        data = request.json
+        gen_text = data.get('gen_text')
+        remove_silence = data.get('remove_silence', False)
 
-    transition_button.click(
-        next_phase,
-        inputs=[current_phase],
-        outputs=[phase1_container, phase2_container, phase3_container, phase4_container, transition_message, current_phase],
-    )
-# Configuración para ejecución en Gradio
-@click.command()
-@click.option("--port", "-p", default=7860, type=int, help="Puerto para ejecutar la aplicación")
-@click.option("--host", "-H", default="0.0.0.0", help="Host para ejecutar la aplicación")
-@click.option("--share", "-s", default=True, is_flag=True, help="Habilitar el enlace público (Gradio live URL).")
-@click.option("--api", "-a", default=True, is_flag=True, help="Permitir acceso a la API.")
-def main(port, host, share, api):
-    """
-    Ejecuta la aplicación principal con Gradio y las configuraciones necesarias.
-    """
-    print("Iniciando la aplicación Spanish-F5...")
-    app.queue(api_open=api).launch(
-        server_name=host,
-        server_port=port,
-        share=share,  # Enlace público habilitado
-        show_api=api,
-    )
+        # Obtener segmentos
+        segments = parse_speechtypes_text(gen_text)
+        
+        # Verificar disponibilidad de tipos de habla
+        for segment in segments:
+            style = segment["style"]
+            if style not in speech_types_dict:
+                return jsonify({'error': f'Tipo de habla no encontrado: {style}'}), 400
+            
+            # Verificar archivos de audio
+            ref_audio = speech_types_dict[style]['audio']
+            if not os.path.exists(ref_audio):
+                return jsonify({'error': f'Archivo de audio no encontrado para {style}: {ref_audio}'}), 404
 
+        generated_audio_segments = []
+        sample_rate = None
 
-if __name__ == "__main__":
-    main()
+        # Generar audio para cada segmento
+        for segment in segments:
+            style = segment["style"]
+            text = segment["text"]
+            
+            speech_type_data = speech_types_dict[style]
+            ref_audio = speech_type_data['audio']
+            ref_text = speech_type_data.get('ref_text', '')
+
+            try:
+                # Generar audio del segmento
+                audio, _ = infer(
+                    ref_audio,
+                    ref_text,
+                    text,
+                    "F5-TTS",
+                    remove_silence,
+                    0
+                )
+                
+                if sample_rate is None:
+                    sample_rate = audio[0]
+                
+                generated_audio_segments.append(audio[1])
+            
+            except Exception as e:
+                return jsonify({'error': f'Error al generar segmento para {style}: {str(e)}'}), 500
+
+        # Combinar segmentos
+        if generated_audio_segments:
+            final_audio_data = np.concatenate(generated_audio_segments)
+            
+            # Guardar audio final
+            temp_audio_path = tempfile.mktemp(suffix='.wav')
+            sf.write(temp_audio_path, final_audio_data, sample_rate)
+            
+            return jsonify({
+                'audio_path': temp_audio_path
+            })
+        else:
+            return jsonify({'error': 'No se generó audio'}), 400
+
+    except Exception as e:
+        return jsonify({'error': f'Error en generación multi-estilo: {str(e)}'}), 500
+
+@app.route('/api/get_audio/<path:filename>')
+def get_audio(filename):
+    """Servir archivos de audio generados"""
+    try:
+        return send_file(filename, mimetype='audio/wav')
+    except Exception as e:
+        return jsonify({'error': str(e)}), 404
+
+@app.route('/api/get_spectrogram/<path:filename>')
+def get_spectrogram(filename):
+    """Servir espectrogramas generados"""
+    try:
+        return send_file(filename, mimetype='image/png')
+    except Exception as e:
+        return jsonify({'error': str(e)}), 404
+
+@app.route('/api/get_speech_types', methods=['GET'])
+def get_speech_types():
+    """Obtener lista de tipos de habla disponibles"""
+    return jsonify(list(speech_types_dict.keys()))
+
+def cleanup_temp_files():
+    """Limpiar archivos temporales periódicamente"""
+    import glob
+    import time
+    
+    # Limpiar archivos temporales
+    temp_files = glob.glob(os.path.join(UPLOAD_FOLDER, '*'))
+    for f in temp_files:
+        try:
+            if os.path.isfile(f) and os.path.getmtime(f) < time.time() - 3600:  # Eliminar archivos más antiguos de 1 hora
+                os.remove(f)
+        except Exception as e:
+            print(f"Error al limpiar el archivo {f}: {e}")
+
+if __name__ == '__main__':
+    import atexit
+    from apscheduler.schedulers.background import BackgroundScheduler
+    
+    # Cargar tipos de habla existentes
+    load_speech_types()
+    
+    # Programar tarea de limpieza
+    scheduler = BackgroundScheduler()
+    scheduler.add_job(func=cleanup_temp_files, trigger="interval", hours=1)
+    scheduler.start()
+    
+    # Registrar limpieza al cerrar
+    atexit.register(lambda: scheduler.shutdown())
+    
+    # Ejecutar aplicación Flask
+    app.run(host='0.0.0.0', port=5000, debug=True)

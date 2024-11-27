@@ -4,6 +4,7 @@ import axios from 'axios';
 import toast from 'react-hot-toast';
 import SpeechTypeInput from './SpeechTypeInput';
 import AudioPlayer from './AudioPlayer';
+import Spectrogram from './Spectrogram'; // Importación por defecto
 
 const MAX_SPEECH_TYPES = 100;
 
@@ -13,13 +14,14 @@ function MultiSpeechGenerator() {
     { id: 'regular', name: 'Regular', isVisible: true }
   ]);
   const [generationText, setGenerationText] = useState('');
-  const [removeScilence, setRemoveScilence] = useState(false);
+  const [removeSilence, setRemoveSilence] = useState(false);
   const [isGenerating, setIsGenerating] = useState(false);
   const [generatedAudio, setGeneratedAudio] = useState(null);
+  const [generatedSpectrogram, setGeneratedSpectrogram] = useState(null); // Estado para espectrograma generado
 
   // Estado para almacenar los datos de audio de referencia
   const [audioData, setAudioData] = useState({
-    regular: { audio: null, refText: '' }
+    regular: { audio: null, refText: '', spectrogram: null }
   });
 
   // Función para agregar un nuevo tipo de habla
@@ -56,23 +58,28 @@ function MultiSpeechGenerator() {
       const formData = new FormData();
       formData.append('audio', file);
       formData.append('speechType', speechType);
-  
+      formData.append('refText', refText);
+
       const response = await axios.post('http://localhost:5000/api/upload_audio', formData, {
         headers: {
           'Content-Type': 'multipart/form-data'
         }
       });
-  
-      setAudioData({
-        ...audioData,
-        [id]: { 
-          audio: response.data.filepath,
-          refText: refText,
-          speechType: speechType
-        }
-      });
-  
-      toast.success('Audio cargado correctamente');
+
+      if (response.data.success) {
+        setAudioData({
+          ...audioData,
+          [id]: { 
+            audio: response.data.filepath,
+            refText: refText,
+            spectrogram: response.data.spectrogramPath // Actualización para incluir espectrograma
+          }
+        });
+
+        toast.success('Audio cargado correctamente');
+      } else {
+        toast.error(response.data.error || 'Error al cargar el audio');
+      }
     } catch (error) {
       toast.error('Error al cargar el audio');
       console.error('Error:', error);
@@ -118,11 +125,16 @@ function MultiSpeechGenerator() {
       const response = await axios.post('http://localhost:5000/api/generate_multistyle_speech', {
         speech_types: speechTypesData,
         gen_text: generationText,
-        remove_silence: removeScilence
+        remove_silence: removeSilence
       });
 
-      setGeneratedAudio(response.data.audio_path);
-      toast.success('Audio generado correctamente');
+      if (response.data.audio_path && response.data.spectrogram_path) {
+        setGeneratedAudio(response.data.audio_path);
+        setGeneratedSpectrogram(response.data.spectrogram_path);
+        toast.success('Audio generado correctamente');
+      } else {
+        toast.error('Error al generar el audio');
+      }
     } catch (error) {
       toast.error('Error al generar el audio');
       console.error('Error:', error);
@@ -169,18 +181,28 @@ function MultiSpeechGenerator() {
         <div className="space-y-6">
           {speechTypes.map((type) => (
             type.isVisible && (
-              <SpeechTypeInput
-                key={type.id}
-                id={type.id}
-                name={type.name}
-                isRegular={type.id === 'regular'}
-                onNameChange={(name) => handleNameUpdate(type.id, name)}
-                onDelete={() => handleDeleteSpeechType(type.id)}
-                onAudioUpload={(file, refText) => handleAudioUpload(type.id, file, refText, type.name)}
-                onInsert={handleInsertSpeechType}
-                uploadedAudio={audioData[type.id]?.audio}
-                uploadedRefText={audioData[type.id]?.refText}
-              />
+              <div key={type.id}>
+                <SpeechTypeInput
+                  id={type.id}
+                  name={type.name}
+                  isRegular={type.id === 'regular'}
+                  onNameChange={(name) => handleNameUpdate(type.id, name)}
+                  onDelete={() => handleDeleteSpeechType(type.id)}
+                  onAudioUpload={(file, refText) => handleAudioUpload(type.id, file, refText, type.name)}
+                  onInsert={handleInsertSpeechType}
+                  uploadedAudio={audioData[type.id]?.audio}
+                  uploadedRefText={audioData[type.id]?.refText}
+                />
+                {audioData[type.id]?.spectrogram && (
+                  <div className="mt-2">
+                    <h4 className="text-md font-medium text-gray-700">Espectrograma de {type.name}:</h4>
+                    <Spectrogram 
+                      spectrogramUrl={`http://localhost:5000/api/get_spectrogram/${audioData[type.id].spectrogram}`} 
+                      altText={`Espectrograma de ${type.name}`} 
+                    />
+                  </div>
+                )}
+              </div>
             )
           ))}
         </div>
@@ -211,8 +233,8 @@ function MultiSpeechGenerator() {
           <label className="flex items-center space-x-2">
             <input
               type="checkbox"
-              checked={removeScilence}
-              onChange={(e) => setRemoveScilence(e.target.checked)}
+              checked={removeSilence}
+              onChange={(e) => setRemoveSilence(e.target.checked)}
               className="rounded border-gray-300"
             />
             <span className="text-sm text-gray-700">Eliminar Silencios</span>
@@ -230,11 +252,20 @@ function MultiSpeechGenerator() {
           {isGenerating ? 'Generando...' : 'Generar Habla Multi-Estilo'}
         </button>
 
-        {/* Reproductor de audio */}
+        {/* Reproductor y espectrograma del audio generado */}
         {generatedAudio && (
           <div className="mt-6">
             <h3 className="text-lg font-medium mb-2">Audio Generado:</h3>
             <AudioPlayer audioUrl={`http://localhost:5000/api/get_audio/${generatedAudio}`} />
+            {generatedSpectrogram && (
+              <div className="mt-2">
+                <h4 className="text-md font-medium text-gray-700">Espectrograma del Audio Generado:</h4>
+                <Spectrogram 
+                  spectrogramUrl={`http://localhost:5000/api/get_spectrogram/${generatedSpectrogram}`} 
+                  altText="Espectrograma del Audio Generado" 
+                />
+              </div>
+            )}
           </div>
         )}
       </div>

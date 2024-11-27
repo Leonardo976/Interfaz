@@ -11,6 +11,7 @@ from num2words import num2words
 import os
 import json
 from werkzeug.utils import secure_filename
+from pydub import AudioSegment  # Importar pydub para la conversión
 
 try:
     import spaces
@@ -185,9 +186,20 @@ def allowed_file(filename):
     ALLOWED_EXTENSIONS = {'wav', 'mp3', 'ogg', 'm4a', 'WAV', 'MP3', 'OGG', 'M4A'}
     return '.' in filename and filename.rsplit('.', 1)[1].upper() in ALLOWED_EXTENSIONS
 
+def convert_to_wav(input_path, output_path):
+    """Convierte un archivo de audio a formato WAV."""
+    try:
+        audio = AudioSegment.from_file(input_path)
+        audio.export(output_path, format="wav")
+        print(f"Archivo convertido a WAV: {output_path}")
+        return output_path
+    except Exception as e:
+        print(f"Error al convertir archivo a WAV: {str(e)}")
+        raise
+
 @app.route('/api/upload_audio', methods=['POST'])
 def upload_audio():
-    """Manejar subidas de archivos de audio"""
+    """Manejar subidas de archivos de audio y generar espectrograma"""
     try:
         # Imprimir todo el contenido del request para debug
         print("Form data recibida:", request.form.to_dict())
@@ -216,8 +228,8 @@ def upload_audio():
             return jsonify({'error': 'Tipo de archivo no permitido'}), 400
         
         # Crear directorio si no existe
-        if not os.path.exists(UPLOAD_FOLDER):
-            os.makedirs(UPLOAD_FOLDER)
+        if not os.path.exists(app.config['UPLOAD_FOLDER']):
+            os.makedirs(app.config['UPLOAD_FOLDER'])
         
         # Generar nombre de archivo único
         import time
@@ -225,7 +237,7 @@ def upload_audio():
         filename = secure_filename(f"{speech_type}_{timestamp}_{file.filename}")
         filepath = os.path.join(app.config['UPLOAD_FOLDER'], filename)
         
-        # Guardar archivo
+        # Guardar archivo original
         try:
             file.save(filepath)
             print(f"Archivo guardado en: {filepath}")
@@ -238,11 +250,56 @@ def upload_audio():
             print("El archivo no se guardó correctamente")
             return jsonify({'error': 'Error al guardar el archivo'}), 500
         
+        # Convertir a WAV si no lo es
+        file_ext = os.path.splitext(filename)[1].lower()
+        if file_ext != '.wav':
+            wav_filename = f"{os.path.splitext(filename)[0]}.wav"
+            wav_filepath = os.path.join(app.config['UPLOAD_FOLDER'], wav_filename)
+            try:
+                wav_filepath = convert_to_wav(filepath, wav_filepath)
+                # Opcional: Eliminar el archivo original no WAV para ahorrar espacio
+                try:
+                    os.remove(filepath)
+                    print(f"Archivo original eliminado: {filepath}")
+                except Exception as e:
+                    print(f"Error al eliminar archivo original: {str(e)}")
+            except Exception as e:
+                return jsonify({'error': f'Error al convertir archivo a WAV: {str(e)}'}), 500
+        else:
+            wav_filepath = filepath
+
+        # Generar espectrograma para el audio en WAV
+        try:
+            waveform, sample_rate = torchaudio.load(wav_filepath)
+            waveform = waveform.squeeze().numpy()
+
+            # Generar el espectrograma
+            spectrogram_filename = f"{os.path.splitext(filename)[0]}_spectrogram.png"
+            spectrogram_path = os.path.join(app.config['UPLOAD_FOLDER'], spectrogram_filename)
+
+            import matplotlib.pyplot as plt
+            from matplotlib import mlab
+
+            plt.figure(figsize=(10, 4))
+            Pxx, freqs, bins, im = plt.specgram(waveform, NFFT=1024, Fs=sample_rate, noverlap=512, cmap='viridis')
+            plt.axis('off')  # Ocultar ejes
+
+            # Añadir epsilon para evitar log10(0)
+            Pxx[Pxx == 0] = 1e-10
+
+            plt.savefig(spectrogram_path, bbox_inches='tight', pad_inches=0)
+            plt.close()
+            print(f"Espectrograma guardado en: {spectrogram_path}")
+        except Exception as e:
+            print(f"Error al generar espectrograma: {str(e)}")
+            return jsonify({'error': f'Error al generar espectrograma: {str(e)}'}), 500
+
         # Actualizar el diccionario de tipos de habla
         try:
             speech_types_dict[speech_type] = {
-                'audio': filepath,
-                'ref_text': ref_text
+                'audio': wav_filepath,  # Usar la ruta del WAV
+                'ref_text': ref_text,
+                'spectrogram': spectrogram_path
             }
             print(f"Diccionario actualizado: {speech_types_dict}")
             
@@ -256,8 +313,9 @@ def upload_audio():
         
         return jsonify({
             'success': True,
-            'filepath': filepath,
+            'filepath': wav_filepath,
             'speechType': speech_type,
+            'spectrogramPath': spectrogram_path,
             'message': f'Tipo de habla {speech_type} guardado correctamente'
         })
         
@@ -298,9 +356,33 @@ def generate_speech():
         temp_audio_path = tempfile.mktemp(suffix='.wav')
         sf.write(temp_audio_path, audio[1], audio[0])
 
+        # Generar espectrograma para el audio generado
+        try:
+            waveform, sample_rate_final = torchaudio.load(temp_audio_path)
+            waveform = waveform.squeeze().numpy()
+
+            spectrogram_generated_path = tempfile.mktemp(suffix='_spectrogram.png')
+            
+            import matplotlib.pyplot as plt
+            from matplotlib import mlab
+
+            plt.figure(figsize=(10, 4))
+            Pxx, freqs, bins, im = plt.specgram(waveform, NFFT=1024, Fs=sample_rate_final, noverlap=512, cmap='viridis')
+            plt.axis('off')  # Ocultar ejes
+
+            # Añadir epsilon para evitar log10(0)
+            Pxx[Pxx == 0] = 1e-10
+
+            plt.savefig(spectrogram_generated_path, bbox_inches='tight', pad_inches=0)
+            plt.close()
+            print(f"Espectrograma del audio generado guardado en: {spectrogram_generated_path}")
+        except Exception as e:
+            print(f"Error al generar espectrograma del audio generado: {str(e)}")
+            return jsonify({'error': f'Error al generar espectrograma del audio generado: {str(e)}'}), 500
+
         return jsonify({
             'audio_path': temp_audio_path,
-            'spectrogram_path': spectrogram_path
+            'spectrogram_path': spectrogram_generated_path
         })
 
     except Exception as e:
@@ -308,7 +390,7 @@ def generate_speech():
 
 @app.route('/api/generate_multistyle_speech', methods=['POST'])
 def generate_multistyle_speech():
-    """Generar habla multi-estilo"""
+    """Generar habla multi-estilo y generar espectrograma del audio final"""
     try:
         data = request.json
         gen_text = data.get('gen_text')
@@ -348,7 +430,7 @@ def generate_multistyle_speech():
                     text,
                     "F5-TTS",
                     remove_silence,
-                    0
+                    cross_fade_duration=0  # Ajuste si es necesario
                 )
                 
                 if sample_rate is None:
@@ -367,8 +449,33 @@ def generate_multistyle_speech():
             temp_audio_path = tempfile.mktemp(suffix='.wav')
             sf.write(temp_audio_path, final_audio_data, sample_rate)
             
+            # Generar espectrograma para el audio final
+            try:
+                waveform, sample_rate_final = torchaudio.load(temp_audio_path)
+                waveform = waveform.squeeze().numpy()
+
+                spectrogram_final_path = tempfile.mktemp(suffix='_spectrogram.png')
+                
+                import matplotlib.pyplot as plt
+                from matplotlib import mlab
+
+                plt.figure(figsize=(10, 4))
+                Pxx, freqs, bins, im = plt.specgram(waveform, NFFT=1024, Fs=sample_rate_final, noverlap=512, cmap='viridis')
+                plt.axis('off')  # Ocultar ejes
+
+                # Añadir epsilon para evitar log10(0)
+                Pxx[Pxx == 0] = 1e-10
+
+                plt.savefig(spectrogram_final_path, bbox_inches='tight', pad_inches=0)
+                plt.close()
+                print(f"Espectrograma del audio final guardado en: {spectrogram_final_path}")
+            except Exception as e:
+                print(f"Error al generar espectrograma del audio final: {str(e)}")
+                return jsonify({'error': f'Error al generar espectrograma del audio final: {str(e)}'}), 500
+
             return jsonify({
-                'audio_path': temp_audio_path
+                'audio_path': temp_audio_path,
+                'spectrogram_path': spectrogram_final_path
             })
         else:
             return jsonify({'error': 'No se generó audio'}), 400

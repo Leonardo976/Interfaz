@@ -4,6 +4,7 @@ import axios from 'axios';
 import toast from 'react-hot-toast';
 import SpeechTypeInput from './SpeechTypeInput';
 import AudioPlayer from './AudioPlayer';
+import ProsodyModifier from './ProsodyModifier'; // Importar el subcomponente
 
 const MAX_SPEECH_TYPES = 100;
 
@@ -13,14 +14,18 @@ function MultiSpeechGenerator() {
     { id: 'regular', name: 'Regular', isVisible: true }
   ]);
   const [generationText, setGenerationText] = useState('');
-  const [removeScilence, setRemoveScilence] = useState(false);
+  const [removeSilence, setRemoveSilence] = useState(false);
   const [isGenerating, setIsGenerating] = useState(false);
   const [generatedAudio, setGeneratedAudio] = useState(null);
+  const [modifiedAudio, setModifiedAudio] = useState(null); // Nuevo estado para audio modificado
 
   // Estado para almacenar los datos de audio de referencia
   const [audioData, setAudioData] = useState({
     regular: { audio: null, refText: '' }
   });
+
+  // Estado para almacenar modificaciones de prosodia
+  const [prosodyModifications, setProsodyModifications] = useState([]);
 
   // Función para agregar un nuevo tipo de habla
   const handleAddSpeechType = () => {
@@ -118,16 +123,44 @@ function MultiSpeechGenerator() {
       const response = await axios.post('http://localhost:5000/api/generate_multistyle_speech', {
         speech_types: speechTypesData,
         gen_text: generationText,
-        remove_silence: removeScilence
+        remove_silence: removeSilence
       });
 
       setGeneratedAudio(response.data.audio_path);
+      setModifiedAudio(null); // Resetear el audio modificado
       toast.success('Audio generado correctamente');
     } catch (error) {
       toast.error('Error al generar el audio');
       console.error('Error:', error);
     } finally {
       setIsGenerating(false);
+    }
+  };
+
+  // Función para manejar las modificaciones de prosodia
+  const handleApplyProsody = async (modifications) => {
+    if (!generatedAudio) {
+      toast.error('No hay audio generado para modificar');
+      return;
+    }
+
+    try {
+      const response = await axios.post('http://localhost:5000/api/modify_prosody', {
+        audio_path: generatedAudio,
+        modifications: modifications.map(mod => ({
+          start_time: mod.start_time,
+          end_time: mod.end_time,
+          pitch_shift: mod.pitch_shift,
+          volume_change: mod.volume_change,
+          speed_change: mod.speed_change
+        }))
+      });
+
+      setModifiedAudio(response.data.output_audio_path);
+      toast.success('Prosodia modificada correctamente');
+    } catch (error) {
+      toast.error('Error al modificar la prosodia');
+      console.error('Error:', error);
     }
   };
 
@@ -211,8 +244,8 @@ function MultiSpeechGenerator() {
           <label className="flex items-center space-x-2">
             <input
               type="checkbox"
-              checked={removeScilence}
-              onChange={(e) => setRemoveScilence(e.target.checked)}
+              checked={removeSilence}
+              onChange={(e) => setRemoveSilence(e.target.checked)}
               className="rounded border-gray-300"
             />
             <span className="text-sm text-gray-700">Eliminar Silencios</span>
@@ -230,11 +263,24 @@ function MultiSpeechGenerator() {
           {isGenerating ? 'Generando...' : 'Generar Habla Multi-Estilo'}
         </button>
 
-        {/* Reproductor de audio */}
+        {/* Reproductor de audio generado */}
         {generatedAudio && (
           <div className="mt-6">
             <h3 className="text-lg font-medium mb-2">Audio Generado:</h3>
             <AudioPlayer audioUrl={`http://localhost:5000/api/get_audio/${generatedAudio}`} />
+          </div>
+        )}
+
+        {/* Componente para Modificar Prosodia */}
+        {generatedAudio && (
+          <ProsodyModifier onAddModification={handleApplyProsody} />
+        )}
+
+        {/* Reproductor de audio modificado */}
+        {modifiedAudio && (
+          <div className="mt-6">
+            <h3 className="text-lg font-medium mb-2">Audio Modificado:</h3>
+            <AudioPlayer audioUrl={`http://localhost:5000/api/get_audio/${modifiedAudio}`} />
           </div>
         )}
       </div>

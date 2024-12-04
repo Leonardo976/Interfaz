@@ -50,7 +50,7 @@ function SpeechTypeInput({
       setIsUploading(true);
       if (audioFile) {
         // Enviamos el refText incluso si está vacío
-        await onAudioUpload(audioFile, refText.trim(), name.trim());
+        await onAudioUpload(audioFile, refText.trim());
         setHasUploadedAudio(true);
         setAudioFile(null);
         // Resetear el input de archivo
@@ -167,6 +167,7 @@ function SpeechTypeInput({
       </div>
     </div>
   );
+
 }
 
 export default SpeechTypeInput;

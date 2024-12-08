@@ -1,161 +1,156 @@
 import React, { useState, useEffect } from 'react';
 import axios from 'axios';
-import toast from 'react-hot-toast';
+import { toast, Toaster } from 'react-hot-toast';
 
-function ProsodyModifier({ onAddModification, generatedAudio, transcriptionData, refText }) {
-  const [modifications, setModifications] = useState([
-    { id: 1, start_time: 0, end_time: 5, pitch_shift: 0, volume_change: 0, speed_change: 1.0 }
-  ]);
+function ProsodyModifier({
+    generatedAudio,  // Audio file path or blob
+    transcriptionData,  // Data from backend transcription
+    refText = ''  // Optional reference text with default empty string
+}) {
+    const [transcriptionDetails, setTranscriptionDetails] = useState({
+        timestampedText: '',
+        wordsWithTimestamps: [],
+        audioDuration: 0,
+        originalText: ''
+    });
+    const [loading, setLoading] = useState(false);
 
-  const [alignedWords, setAlignedWords] = useState([]);
-
-  // Función de Levenshtein
-  function levenshtein(a, b) {
-    const m = a.length, n = b.length;
-    const dp = Array.from({ length: m + 1 }, () => Array(n + 1).fill(0));
-    for (let i = 0; i <= m; i++) dp[i][0] = i;
-    for (let j = 0; j <= n; j++) dp[0][j] = j;
-    for (let i = 1; i <= m; i++) {
-      for (let j = 1; j <= n; j++) {
-        const cost = a[i - 1] === b[j - 1] ? 0 : 1;
-        dp[i][j] = Math.min(dp[i - 1][j] + 1, dp[i][j - 1] + 1, dp[i - 1][j - 1] + cost);
-      }
-    }
-    return dp[m][n];
-  }
-
-  function normalize(word) {
-    return word.toLowerCase().replace(/[^\wñáéíóúü]+/g, '');
-  }
-
-  // Alinear palabras originales con reconocidas
-  useEffect(() => {
-    if (transcriptionData && refText) {
-      const originalText = refText;
-      const originalWords = originalText.match(/\S+|\n/g) || [];
-
-      const recognizedWords = [];
-      if (transcriptionData?.segments && Array.isArray(transcriptionData.segments)) {
-        for (const seg of transcriptionData.segments) {
-          if (seg.words) {
-            for (const w of seg.words) {
-              recognizedWords.push(w);
-            }
-          }
+    // Effect to handle transcription data from props
+    useEffect(() => {
+        if (transcriptionData) {
+            setTranscriptionDetails({
+                timestampedText: transcriptionData.timestamped_text || '',
+                wordsWithTimestamps: transcriptionData.words_with_timestamps || [],
+                audioDuration: transcriptionData.audio_duration || 0,
+                originalText: transcriptionData.original_text || ''
+            });
         }
-      }
+    }, [transcriptionData]);
 
-      const aligned = [];
-      let previousEnd = 0; // Usar el tiempo final de la palabra anterior
-      for (const ow of originalWords) {
-        const ow_norm = normalize(ow);
-        if (!ow_norm) {
-          aligned.push({ word: ow, start: null, end: null });
-          continue;
+    // Effect to automatically analyze audio when generatedAudio changes
+    useEffect(() => {
+        if (generatedAudio) {
+            handleAnalyzeAudio();
+        }
+    }, [generatedAudio]);
+
+    const handleAnalyzeAudio = async () => {
+        if (!generatedAudio) {
+            toast.error('No audio file provided');
+            return;
         }
 
-        let best_match = null;
-        let best_dist = Infinity;
-        for (const rw of recognizedWords) {
-          const rw_norm = normalize(rw.word);
-          const dist = levenshtein(ow_norm, rw_norm);
-          if (dist < best_dist) {
-            best_dist = dist;
-            best_match = rw;
-          }
+        try {
+            setLoading(true);
+            // Send audio and optional reference text to backend
+            const response = await axios.post('/api/analyze_audio', {
+                audio_path: generatedAudio,
+                ref_text: refText
+            });
+
+            // Update state with comprehensive transcription details
+            setTranscriptionDetails({
+                timestampedText: response.data.timestamped_text,
+                wordsWithTimestamps: response.data.words_with_timestamps,
+                audioDuration: response.data.audio_duration,
+                originalText: response.data.original_text
+            });
+
+            toast.success('Audio analyzed successfully');
+        } catch (error) {
+            console.error('Audio analysis error:', error);
+            toast.error('Failed to analyze audio');
+        } finally {
+            setLoading(false);
         }
+    };
 
-        if (best_match && best_dist <= Math.max(ow_norm.length / 2, 2)) {
-          aligned.push({ word: ow, start: best_match.start, end: best_match.end });
-          previousEnd = best_match.end; // Actualizar el tiempo de la palabra final
-        } else {
-          // Si no se encuentra, usar interpolación entre el tiempo anterior y predecir el siguiente
-          const interpolatedStart = previousEnd + 0.1; // Tiempo anterior + 100ms
-          const interpolatedEnd = interpolatedStart + 0.3; // Duración por defecto de 300ms
-          aligned.push({ word: ow, start: interpolatedStart, end: interpolatedEnd });
-          previousEnd = interpolatedEnd;
-        }
-      }
+    return (
+        <div className="prosody-modifier relative p-4 bg-gray-50 rounded-lg shadow-md">
+            <Toaster position="top-right" />
 
-      setAlignedWords(aligned);
-    }
-  }, [transcriptionData, refText]);
+            {/* Audio Analysis Section */}
+            <div className="bg-white p-6 rounded-lg shadow-inner">
+                <h3 className="text-2xl font-bold mb-4 text-gray-800">Audio Transcription</h3>
 
-  const handleChange = (id, field, value) => {
-    setModifications(modifications.map(mod => 
-      mod.id === id ? { ...mod, [field]: value } : mod
-    ));
-  };
+                {/* Loading Indicator */}
+                {loading && (
+                    <div className="absolute top-4 right-4 text-blue-600 font-semibold">
+                        Analyzing audio...
+                    </div>
+                )}
 
-  const handleAddModification = () => {
-    setModifications([
-      ...modifications,
-      { id: modifications.length + 1, start_time: 0, end_time: 5, pitch_shift: 0, volume_change: 0, speed_change: 1.0 }
-    ]);
-  };
+                {/* Comprehensive Transcription Details */}
+                <div className="space-y-4">
+                    {/* Original Text */}
+                    {transcriptionDetails.originalText && (
+                        <div>
+                            <h4 className="font-semibold text-lg text-gray-700 mb-2">Original Text</h4>
+                            <p className="text-gray-600 italic">{transcriptionDetails.originalText}</p>
+                        </div>
+                    )}
 
-  const handleRemoveModification = (id) => {
-    setModifications(modifications.filter(mod => mod.id !== id));
-  };
+                    {/* Timestamped Text */}
+                    {transcriptionDetails.timestampedText && (
+                        <div>
+                            <h4 className="font-semibold text-lg text-gray-700 mb-2">Timestamped Text</h4>
+                            <p className="text-base text-gray-800">{transcriptionDetails.timestampedText}</p>
+                        </div>
+                    )}
 
-  const handleSubmit = () => {
-    for (let mod of modifications) {
-      if (mod.start_time < 0 || mod.end_time < 0) {
-        toast.error('Los tiempos de inicio y fin no pueden ser negativos');
-        return;
-      }
-      if (mod.start_time >= mod.end_time) {
-        toast.error('El tiempo de inicio debe ser menor que el tiempo de fin');
-        return;
-      }
-      if (mod.speed_change <= 0) {
-        toast.error('El factor de cambio de velocidad debe ser mayor que 0');
-        return;
-      }
-    }
+                    {/* Detailed Word Timestamps */}
+                    {transcriptionDetails.wordsWithTimestamps.length > 0 && (
+                        <div>
+                            <h4 className="font-semibold text-lg text-gray-700 mb-2">Detailed Word Timestamps</h4>
+                            <div className="overflow-x-auto">
+                                <table className="w-full border-collapse">
+                                    <thead>
+                                        <tr className="bg-gray-200">
+                                            <th className="p-2 text-left">Word</th>
+                                            <th className="p-2 text-left">Start Time (s)</th>
+                                            <th className="p-2 text-left">End Time (s)</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody>
+                                        {transcriptionDetails.wordsWithTimestamps.map((wordData, index) => (
+                                            <tr 
+                                                key={index} 
+                                                className="border-b hover:bg-gray-100 transition-colors"
+                                            >
+                                                <td className="p-2">{wordData.word}</td>
+                                                <td className="p-2">{wordData.start.toFixed(2)}</td>
+                                                <td className="p-2">{wordData.end.toFixed(2)}</td>
+                                            </tr>
+                                        ))}
+                                    </tbody>
+                                </table>
+                            </div>
+                        </div>
+                    )}
 
-    onAddModification(modifications);
-  };
+                    {/* Audio Duration */}
+                    {transcriptionDetails.audioDuration > 0 && (
+                        <div className="mt-4">
+                            <strong className="text-gray-700">Audio Duration:</strong> 
+                            <span className="ml-2 text-gray-600">
+                                {transcriptionDetails.audioDuration.toFixed(2)} seconds
+                            </span>
+                        </div>
+                    )}
+                </div>
 
-  return (
-    <div className="mt-8 bg-gray-50 p-6 rounded-lg shadow">
-      <h3 className="text-xl font-semibold mb-4">Modificar Prosodia</h3>
-
-      {alignedWords.length > 0 && (
-        <div className="mb-8 bg-white p-4 rounded-md shadow">
-          <h4 className="text-lg font-medium mb-2">Texto Original con Timestamps</h4>
-          <div className="flex flex-wrap mt-2">
-            {alignedWords.map((w, idx) => (
-              <span key={idx} className="mr-2 mb-2 p-1 bg-gray-200 rounded text-sm">
-                ({w.start !== null ? w.start.toFixed(2)+'s' : 'null'}) {w.word}
-              </span>
-            ))}
-          </div>
+                {/* Manual Trigger Button (Optional) */}
+                {generatedAudio && !loading && (
+                    <button
+                        onClick={handleAnalyzeAudio}
+                        className="mt-4 w-full px-4 py-2 bg-blue-500 text-white rounded-md hover:bg-blue-600 transition-colors"
+                    >
+                        Reanalyze Audio
+                    </button>
+                )}
+            </div>
         </div>
-      )}
-
-      {modifications.map(mod => (
-        <div key={mod.id} className="mb-4 border-b pb-4">
-          <div className="flex justify-between items-center">
-            <h4 className="text-lg font-medium">Modificación {mod.id}</h4>
-            {modifications.length > 1 && (
-              <button onClick={() => handleRemoveModification(mod.id)} className="text-red-500 hover:text-red-700">
-                Eliminar
-              </button>
-            )}
-          </div>
-        </div>
-      ))}
-
-      <button onClick={handleAddModification} className="mt-4 px-4 py-2 bg-blue-600 text-white rounded hover:bg-blue-700 transition">
-        Agregar Modificación
-      </button>
-
-      <button onClick={handleSubmit} className="mt-6 px-6 py-3 bg-green-600 text-white rounded-lg font-medium hover:bg-green-700 transition">
-        Aplicar Modificaciones
-      </button>
-    </div>
-  );
+    );
 }
 
 export default ProsodyModifier;

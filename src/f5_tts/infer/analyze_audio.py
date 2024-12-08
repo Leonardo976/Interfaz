@@ -3,123 +3,154 @@ import logging
 from flask import Blueprint, request, jsonify
 import torch
 import librosa
+import numpy as np
 from transformers import WhisperProcessor, WhisperForConditionalGeneration
 
 logger = logging.getLogger(__name__)
 analyze_bp = Blueprint('analyze', __name__)
 
-# Cargar el modelo Whisper de HuggingFace una sola vez
-logger.info("Cargando el modelo Whisper large-v2 desde HuggingFace...")
+# Load Whisper model from HuggingFace once
+logger.info("Loading Whisper large-v2 model from HuggingFace...")
 model_name = "openai/whisper-large-v2"
 processor = WhisperProcessor.from_pretrained(model_name)
 model = WhisperForConditionalGeneration.from_pretrained(model_name)
-logger.info("Modelo Whisper large-v2 cargado con éxito.")
+logger.info("Whisper large-v2 model loaded successfully.")
+
+def generate_dynamic_timestamps(words, audio_duration):
+    """
+    Generate dynamic timestamps for words based on audio duration
+    
+    Args:
+        words (list): List of words
+        audio_duration (float): Total duration of the audio in seconds
+    
+    Returns:
+        list: List of dictionaries with word, start, and end timestamps
+    """
+    if not words:
+        return []
+
+    # Calculate total word length and average word duration
+    total_word_length = sum(len(word) for word in words)
+    
+    # Distribute timestamps proportionally
+    words_with_timestamps = []
+    current_time = 0
+    
+    for word in words:
+        # Calculate word's proportional duration
+        word_ratio = len(word) / total_word_length
+        word_duration = word_ratio * audio_duration
+        
+        # Create timestamp entry
+        words_with_timestamps.append({
+            "word": word,
+            "start": round(current_time, 2),
+            "end": round(current_time + word_duration, 2)
+        })
+        
+        current_time += word_duration
+    
+    return words_with_timestamps
+
+def normalize_text(text):
+    """
+    Normalize text by removing extra whitespaces and converting to lowercase
+    """
+    return ' '.join(text.lower().split())
+
+def format_timestamped_text(words_with_timestamps):
+    """
+    Format words with timestamps in the specified style
+    
+    Args:
+        words_with_timestamps (list): List of dictionaries with word timestamps
+    
+    Returns:
+        str: Formatted text with timestamps
+    """
+    return ' '.join([f"({w['start']}s) {w['word']}" for w in words_with_timestamps])
 
 @analyze_bp.route('/api/analyze_audio', methods=['POST'])
 def analyze_audio():
     """
-    Endpoint para analizar el audio generado y obtener transcripción con marcas de tiempo usando HuggingFace Whisper.
-    Espera un JSON con:
-    - audio_path: Ruta al archivo de audio a analizar.
+    Endpoint to analyze generated audio and get transcription with timestamps using HuggingFace Whisper
     """
     try:
         data = request.json
         audio_path = data.get('audio_path')
+        ref_text = data.get('ref_text', '')
 
         if not audio_path or not os.path.exists(audio_path):
-            logger.error('Ruta de audio inválida o no existe el archivo')
-            return jsonify({'error': 'Ruta de audio inválida o no existe el archivo'}), 400
+            logger.error('Invalid audio path or file does not exist')
+            return jsonify({'error': 'Invalid audio path or file does not exist'}), 400
 
-        logger.info(f"Analizando el archivo de audio: {audio_path}")
+        logger.info(f"Analyzing audio file: {audio_path}")
 
-        # Cargar el audio y convertirlo a 16 kHz
+        # Load audio and get duration
         audio, sr = librosa.load(audio_path, sr=16000)
+        audio_duration = librosa.get_duration(y=audio, sr=sr)
 
-        # Procesar el audio
-        logger.info("Procesando el audio para la transcripción...")
+        # Process the audio
+        logger.info("Processing audio for transcription...")
         inputs = processor(audio, sampling_rate=16000, return_tensors="pt")
         
-        # Generar la transcripción con los timestamps de las palabras
-        logger.info("Generando la transcripción con Whisper...")
+        # Generate transcription with word timestamps
+        logger.info("Generating transcription with Whisper...")
         with torch.no_grad():
             generated_output = model.generate(
                 inputs.input_features, 
                 return_dict_in_generate=True, 
                 output_scores=True, 
                 max_length=448,
-                return_timestamps=True  # 🔥 Importante: return_timestamps=True
+                return_timestamps=True
             )
 
-        # Decodificar la transcripción
+        # Decode the transcription
         transcription = processor.batch_decode(generated_output.sequences, skip_special_tokens=True)[0]
+        
+        # Prepare processing of words
+        normalized_ref_text = normalize_text(ref_text)
+        normalized_transcription = normalize_text(transcription)
+        
+        # Fallback to reference text or transcription
+        text_to_use = ref_text if ref_text else transcription
+        words = text_to_use.split()
 
-        logger.info(f"Transcripción completa: {transcription}")
+        # Generate timestamps
+        words_with_timestamps = generate_dynamic_timestamps(words, audio_duration)
 
-        # Extraer los tokens y sus timestamps
-        logger.info("Obteniendo marcas de tiempo para las palabras...")
+        # Format timestamped text
+        formatted_timestamped_text = format_timestamped_text(words_with_timestamps)
 
-        words_with_timestamps = []
-
-        for idx, token_id in enumerate(generated_output.sequences[0]):
-            token_text = processor.decode([token_id], skip_special_tokens=True).strip()
-            
-            # 🔥🔥 Verificar la forma de start_time y end_time 🔥🔥
-            start_time = generated_output.scores[idx][0] if idx < len(generated_output.scores) else None
-            end_time = generated_output.scores[idx + 1][0] if idx + 1 < len(generated_output.scores) else None
-
-            # 🔥 Convertir los tensores a números reales
-            if start_time is not None and isinstance(start_time, torch.Tensor):
-                # Seleccionar el valor correcto
-                if start_time.dim() > 0:  # Si tiene varias dimensiones
-                    start_time = start_time[0].item()  # Toma el primer elemento
-                else:
-                    start_time = start_time.item()
-
-            if end_time is not None and isinstance(end_time, torch.Tensor):
-                # Seleccionar el valor correcto
-                if end_time.dim() > 0:  # Si tiene varias dimensiones
-                    end_time = end_time[0].item()  # Toma el primer elemento
-                else:
-                    end_time = end_time.item()
-
-            if start_time is not None and end_time is not None and token_text:
-                words_with_timestamps.append({
-                    "word": token_text,
-                    "start": round(start_time, 2),
-                    "end": round(end_time, 2)
-                })
-
-        logger.info(f"Timestamps generados para las palabras: {words_with_timestamps}")
-
-        segments_list = []
-        words_list = []
-
-        for word_data in words_with_timestamps:
-            words_list.append({
-                "word": word_data["word"],
-                "start": word_data["start"],
-                "end": word_data["end"]
-            })
-
-        # Agrupar las palabras en segmentos
-        if len(words_list) > 0:
-            segment = {
-                "id": 1,
-                "start": round(words_list[0]["start"], 2),
-                "end": round(words_list[-1]["end"], 2),
-                "text": transcription,
-                "words": words_list
-            }
-            segments_list.append(segment)
-
+        # Prepare result
         result = {
-            "text": transcription,
-            "segments": segments_list
+            "original_text": transcription,
+            "ref_text": ref_text,
+            "audio_duration": round(audio_duration, 2),
+            "timestamped_text": formatted_timestamped_text,
+            "words_with_timestamps": words_with_timestamps,
+            "segments": [{
+                "id": 1,
+                "start": 0,
+                "end": round(audio_duration, 2),
+                "text": transcription,
+                "words": words_with_timestamps
+            }]
         }
 
-        logger.info(f"Transcripción y marcas de tiempo generadas con éxito para {audio_path}")
+        logger.info(f"Transcription and timestamps generated successfully for {audio_path}")
         return jsonify(result), 200
 
     except Exception as e:
-        logger.exception(f"Error al analizar audio con Whisper: {e}")
+        logger.exception(f"Error analyzing audio with Whisper: {e}")
         return jsonify({'error': str(e)}), 500
+
+# Example usage in a route or function
+def example_usage(audio_path, ref_text):
+    with app.test_request_context(json={
+        'audio_path': audio_path, 
+        'ref_text': ref_text
+    }):
+        response = analyze_audio()
+        print(response.json)  # Process the result as needed

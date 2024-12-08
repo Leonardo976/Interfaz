@@ -40,6 +40,11 @@ dependencies = [
     "wandb",
     "x_transformers>=1.31.14",
     "num2words",
+    "flask",
+    "flask_cors",
+    "apscheduler",
+    "torchvision",
+    "faster_whisper"
 ]
 
 [project.optional-dependencies]
@@ -60,3 +65,8 @@ Homepage = "https://github.com/SWivid/F5-TTS"
 "f5-tts_infer-gradio" = "f5_tts.infer.infer_gradio:main"
 "f5-tts_finetune-cli" = "f5_tts.train.finetune_cli:main"
 "f5-tts_finetune-gradio" = "f5_tts.train.finetune_gradio:main"
+
+[[tool.poetry.source]]
+name = "pytorch"
+url = "https://download.pytorch.org/whl/cu121"
+default = true

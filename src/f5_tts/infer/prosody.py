@@ -1,18 +1,28 @@
 # prosody.py
 
-import numpy as np
-import librosa
-import soundfile as sf
+import os
 import tempfile
 import logging
-import os
-import inspect  # Para inspeccionar la función pitch_shift
+from pydub import AudioSegment, effects
+import librosa
+import numpy as np
+import soundfile as sf
 
 # Configurar logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-def modify_prosody(audio_path, modifications, output_path=None):
+def modify_prosody(
+    audio_path,
+    modifications,
+    remove_silence=False,
+    min_silence_len=500,    # en milisegundos
+    silence_thresh=-40,      # en dBFS
+    keep_silence=250,        # en milisegundos
+    cross_fade_duration=0.15,  # en segundos
+    global_speed_change=1.0,    # Factor global para cambio de velocidad
+    output_path=None
+):
     """
     Modifica la prosodia de un archivo de audio.
 
@@ -25,6 +35,12 @@ def modify_prosody(audio_path, modifications, output_path=None):
         - volume_change: dB para aumentar/disminuir el volumen (0 para sin cambio).
         - speed_change: Factor para cambiar la velocidad (1.0 para sin cambio).
 
+    - remove_silence: Si se debe eliminar silencios.
+    - min_silence_len: Longitud mínima de silencio para eliminar (ms).
+    - silence_thresh: Umbral de silencio en dBFS.
+    - keep_silence: Duración del silencio a mantener en cada extremo (ms).
+    - cross_fade_duration: Duración del cross-fade entre clips de audio (s).
+    - global_speed_change: Factor global para cambiar la velocidad del audio completo.
     - output_path: Ruta para guardar el audio modificado. Si es None, se usará un archivo temporal.
 
     Retorna:
@@ -35,148 +51,171 @@ def modify_prosody(audio_path, modifications, output_path=None):
         logger.error(f"El archivo de audio no existe: {audio_path}")
         raise FileNotFoundError(f"El archivo de audio no existe: {audio_path}")
 
-    # Cargar el archivo de audio
+    # Cargar el archivo de audio con pydub
     try:
-        y, sr = librosa.load(audio_path, sr=None)
-        logger.info(f"Cargado audio desde {audio_path} con sr={sr}, duración={len(y)/sr:.2f}s")
+        audio = AudioSegment.from_file(audio_path)
+        logger.info(f"Cargado audio desde {audio_path} con duración {len(audio) / 1000:.2f}s")
     except Exception as e:
         logger.error(f"Error al cargar el audio: {e}")
         raise RuntimeError(f"Error al cargar el audio: {e}")
 
-    # Inspección de la función pitch_shift
-    logger.debug(f"librosa.effects.pitch_shift: {librosa.effects.pitch_shift}")
-    try:
-        logger.debug(f"Firma de pitch_shift: {inspect.signature(librosa.effects.pitch_shift)}")
-    except ValueError:
-        logger.debug("No se pudo obtener la firma de la función pitch_shift.")
-
-    total_samples = len(y)
-    total_duration = total_samples / sr
-
-    # Validar modificaciones
-    for idx, mod in enumerate(modifications):
-        start_time = mod.get('start_time', 0)
-        end_time = mod.get('end_time', total_duration)
-        pitch_shift_value = mod.get('pitch_shift', 0)
-        volume_change = mod.get('volume_change', 0)
-        speed_change = mod.get('speed_change', 1.0)
-
-        # Validaciones de tiempo y velocidad
-        if start_time < 0 or end_time < 0:
-            logger.error(f"Modificación {idx}: Los tiempos de inicio y fin no pueden ser negativos.")
-            raise ValueError(f"Modificación {idx}: Los tiempos de inicio y fin no pueden ser negativos.")
-        if start_time >= end_time:
-            logger.error(f"Modificación {idx}: El tiempo de inicio debe ser menor que el tiempo de fin.")
-            raise ValueError(f"Modificación {idx}: El tiempo de inicio debe ser menor que el tiempo de fin.")
-        if speed_change <= 0:
-            logger.error(f"Modificación {idx}: El factor de cambio de velocidad debe ser mayor que 0.")
-            raise ValueError(f"Modificación {idx}: El factor de cambio de velocidad debe ser mayor que 0.")
+    # Aplicar eliminación de silencios si es necesario
+    if remove_silence:
+        logger.info("Eliminando silencios del audio")
+        audio = effects.strip_silence(
+            audio,
+            silence_len=min_silence_len,
+            silence_thresh=silence_thresh,
+            padding=keep_silence
+        )
+        logger.info("Silencios eliminados")
 
     # Ordenar las modificaciones por start_time
     modifications = sorted(modifications, key=lambda x: x['start_time'])
     logger.info(f"Modificaciones ordenadas: {modifications}")
 
-    # Inicializar variables
+    # Inicializar variables para segmentación
     segments = []
-    last_end_sample = 0
+    last_end_ms = 0
 
     for idx, mod in enumerate(modifications):
-        start_time = mod['start_time']
-        end_time = mod['end_time']
-        pitch_shift_value = mod['pitch_shift']
-        volume_change = mod['volume_change']
-        speed_change = mod['speed_change']
+        start_time = mod.get('start_time', 0)
+        end_time = mod.get('end_time', len(audio) / 1000)  # en segundos
+        pitch_shift = mod.get('pitch_shift', 0)
+        volume_change = mod.get('volume_change', 0)
+        speed_change = mod.get('speed_change', 1.0)
 
-        # Convertir tiempos a índices de muestras
-        start_sample = int(start_time * sr)
-        end_sample = int(end_time * sr)
+        # Validaciones de tiempo y velocidad
+        if start_time < 0 or end_time < 0:
+            logger.error(f"Modificación {idx + 1}: Los tiempos de inicio y fin no pueden ser negativos.")
+            raise ValueError(f"Modificación {idx + 1}: Los tiempos de inicio y fin no pueden ser negativos.")
+        if start_time >= end_time:
+            logger.error(f"Modificación {idx + 1}: El tiempo de inicio debe ser menor que el tiempo de fin.")
+            raise ValueError(f"Modificación {idx + 1}: El tiempo de inicio debe ser menor que el tiempo de fin.")
+        if speed_change <= 0:
+            logger.error(f"Modificación {idx + 1}: El factor de cambio de velocidad debe ser mayor que 0.")
+            raise ValueError(f"Modificación {idx + 1}: El factor de cambio de velocidad debe ser mayor que 0.")
+
+        # Convertir tiempos a milisegundos
+        start_ms = int(start_time * 1000)
+        end_ms = int(end_time * 1000)
 
         # Asegurar que los índices estén dentro de los límites
-        start_sample = max(0, min(start_sample, total_samples))
-        end_sample = max(0, min(end_sample, total_samples))
+        start_ms = max(0, min(start_ms, len(audio)))
+        end_ms = max(0, min(end_ms, len(audio)))
 
-        logger.info(f"Procesando modificación {idx + 1}: inicio={start_time}s ({start_sample}), fin={end_time}s ({end_sample}), "
-                    f"pitch_shift={pitch_shift_value}, volume_change={volume_change}, speed_change={speed_change}")
+        logger.info(f"Procesando modificación {idx + 1}: inicio={start_time}s ({start_ms}ms), fin={end_time}s ({end_ms}ms), "
+                    f"pitch_shift={pitch_shift}, volume_change={volume_change}, speed_change={speed_change}")
 
         # Agregar segmento sin modificar antes de la modificación actual
-        if start_sample > last_end_sample:
-            unmodified_segment = y[last_end_sample:start_sample]
+        if start_ms > last_end_ms:
+            unmodified_segment = audio[last_end_ms:start_ms]
             segments.append(unmodified_segment)
-            logger.debug(f"Agregado segmento sin modificar: muestras {last_end_sample} - {start_sample}")
+            logger.debug(f"Agregado segmento sin modificar: {last_end_ms}ms - {start_ms}ms")
 
         # Extraer el segmento a modificar
-        segment = y[start_sample:end_sample]
-        logger.debug(f"Segmento a modificar: {len(segment)} muestras")
+        segment = audio[start_ms:end_ms]
+        logger.debug(f"Segmento a modificar: {len(segment) / 1000:.2f}s")
 
-        # Aplicar cambio de tono
-        if pitch_shift_value != 0:
+        # Convertir a numpy array para procesamiento con librosa
+        y = np.array(segment.get_array_of_samples()).astype(np.float32)
+        y /= np.iinfo(segment.array_type).max  # Normalizar
+
+        # Si el audio es estéreo, convertir a mono para procesamiento
+        if segment.channels > 1:
+            y = y.reshape((-1, segment.channels))
+            y = y.mean(axis=1)
+
+        # Aplicar pitch shift
+        if pitch_shift != 0:
             try:
-                # Llamada correcta a pitch_shift
-                segment = librosa.effects.pitch_shift(segment, sr, n_steps=pitch_shift_value)
-                logger.debug(f"Cambio de tono aplicado: {pitch_shift_value} semitonos")
-            except TypeError as e:
-                logger.error(f"Error al aplicar cambio de tono en modificación {idx + 1}: {e}")
-                # Mantener el segmento original en caso de fallo
-                pass
+                y = librosa.effects.pitch_shift(y, segment.frame_rate, n_steps=pitch_shift)
+                logger.debug(f"Cambio de pitch aplicado: {pitch_shift} semitonos")
             except Exception as e:
-                logger.error(f"Error inesperado al aplicar cambio de tono en modificación {idx + 1}: {e}")
+                logger.error(f"Error al aplicar cambio de pitch en modificación {idx + 1}: {e}")
+                # Mantener el segmento original en caso de fallo
                 pass
 
         # Aplicar cambio de velocidad
         if speed_change != 1.0:
             try:
-                segment = librosa.effects.time_stretch(segment, rate=speed_change)
+                y = librosa.effects.time_stretch(y, rate=speed_change)
                 logger.debug(f"Cambio de velocidad aplicado: factor {speed_change}")
-            except librosa.util.exceptions.ParameterError as e:
+            except Exception as e:
                 logger.error(f"Error al aplicar cambio de velocidad en modificación {idx + 1}: {e}")
                 # Mantener el segmento original en caso de fallo
                 pass
-            except Exception as e:
-                logger.error(f"Otro error al aplicar cambio de velocidad en modificación {idx + 1}: {e}")
-                # Mantener el segmento original en caso de fallo
-                pass
+
+        # Convertir de vuelta a AudioSegment
+        y = (y * np.iinfo('int16').max).astype('int16')
+        modified_segment = AudioSegment(
+            y.tobytes(),
+            frame_rate=int(segment.frame_rate * speed_change),
+            sample_width=segment.sample_width,
+            channels=1  # Mono después del procesamiento
+        )
 
         # Aplicar cambio de volumen
         if volume_change != 0:
-            try:
-                volume_factor = 10 ** (volume_change / 20)
-                segment *= volume_factor
-                logger.debug(f"Cambio de volumen aplicado: {volume_change} dB")
-            except Exception as e:
-                logger.error(f"Error al aplicar cambio de volumen en modificación {idx + 1}: {e}")
-                # Mantener el segmento original en caso de fallo
-                pass
+            modified_segment = modified_segment + volume_change  # pydub permite sumar o restar dB
+            logger.debug(f"Cambio de volumen aplicado: {volume_change} dB")
 
-        # Evitar clipping en el segmento
-        max_amp = np.max(np.abs(segment))
-        if max_amp > 1.0:
-            segment = segment / max_amp
-            logger.debug("Segmento normalizado para evitar clipping")
+        # Evitar clipping en el segmento modificado
+        max_amp = modified_segment.max
+        if max_amp > 32767:
+            modified_segment = modified_segment.apply_gain(-20)  # Reducir ganancia para evitar clipping
+            logger.debug("Segmento modificado normalizado para evitar clipping")
 
-        # Agregar segmento modificado
-        segments.append(segment)
-        last_end_sample = end_sample
-        logger.debug(f"Segmento modificado agregado: muestras {start_sample} - {end_sample}")
+        # Agregar el segmento modificado
+        segments.append(modified_segment)
+        logger.debug(f"Segmento modificado agregado: {start_ms}ms - {end_ms}ms")
+        last_end_ms = end_ms
 
     # Agregar cualquier segmento restante sin modificar después de la última modificación
-    if last_end_sample < total_samples:
-        unmodified_segment = y[last_end_sample:]
+    if last_end_ms < len(audio):
+        unmodified_segment = audio[last_end_ms:]
         segments.append(unmodified_segment)
-        logger.debug(f"Agregado segmento sin modificar al final: muestras {last_end_sample} - {total_samples}")
+        logger.debug(f"Agregado segmento sin modificar al final: {last_end_ms}ms - {len(audio)}ms")
 
-    # Concatenar todos los segmentos
-    try:
-        y_modified = np.concatenate(segments)
-        logger.info(f"Concatenación de segmentos completada, longitud total: {len(y_modified)} muestras")
-    except Exception as e:
-        logger.error(f"Error al concatenar segmentos: {e}")
-        raise RuntimeError(f"Error al concatenar segmentos: {e}")
+    # Concatenar todos los segmentos con cross-fade si es necesario
+    if cross_fade_duration > 0 and len(segments) > 1:
+        cross_fade_ms = int(cross_fade_duration * 1000)
+        final_audio = segments[0]
+        for seg in segments[1:]:
+            final_audio = final_audio.append(seg, crossfade=cross_fade_ms)
+            logger.debug(f"Aplicado cross-fade de {cross_fade_ms}ms entre segmentos")
+    else:
+        final_audio = sum(segments)
 
-    # Normalizar para evitar clipping general
-    max_amp = np.max(np.abs(y_modified))
-    if max_amp > 1.0:
-        y_modified = y_modified / max_amp
-        logger.debug("Audio final normalizado para evitar clipping")
+    # Aplicar cambio de velocidad global si es necesario
+    if global_speed_change != 1.0:
+        logger.info(f"Aplicando cambio de velocidad global: {global_speed_change}x")
+        # Exportar a numpy para procesar con librosa
+        y_final = np.array(final_audio.get_array_of_samples()).astype(np.float32)
+        y_final /= np.iinfo(final_audio.array_type).max  # Normalizar
+
+        # Si el audio es estéreo, convertir a mono
+        if final_audio.channels > 1:
+            y_final = y_final.reshape((-1, final_audio.channels))
+            y_final = y_final.mean(axis=1)
+
+        # Aplicar cambio de velocidad global
+        y_final = librosa.effects.time_stretch(y_final, rate=global_speed_change)
+        logger.debug(f"Cambio de velocidad global aplicado: {global_speed_change}x")
+
+        # Convertir de vuelta a AudioSegment
+        y_final = (y_final * np.iinfo('int16').max).astype('int16')
+        final_audio = AudioSegment(
+            y_final.tobytes(),
+            frame_rate=int(final_audio.frame_rate * global_speed_change),
+            sample_width=final_audio.sample_width,
+            channels=1  # Mono después del procesamiento
+        )
+
+        # Evitar clipping
+        if final_audio.max > 32767:
+            final_audio = final_audio.apply_gain(-20)
+            logger.debug("Audio final normalizado para evitar clipping global")
 
     # Guardar el audio modificado
     if output_path is None:
@@ -189,7 +228,7 @@ def modify_prosody(audio_path, modifications, output_path=None):
             raise RuntimeError(f"Error al crear archivo temporal: {e}")
 
     try:
-        sf.write(output_path, y_modified, sr)
+        final_audio.export(output_path, format='wav')
         logger.info(f"Audio modificado guardado exitosamente en: {output_path}")
     except Exception as e:
         logger.error(f"Error al guardar el audio modificado: {e}")

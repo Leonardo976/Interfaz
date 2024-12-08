@@ -1,33 +1,31 @@
 // src/components/MultiSpeechGenerator.jsx
+
 import React, { useState, useEffect } from 'react';
 import axios from 'axios';
 import toast from 'react-hot-toast';
 import SpeechTypeInput from './SpeechTypeInput';
 import AudioPlayer from './AudioPlayer';
-import ProsodyModifier from './ProsodyModifier'; // Importar el subcomponente
+import ProsodyModifier from './ProsodyModifier';
 
 const MAX_SPEECH_TYPES = 100;
 
 function MultiSpeechGenerator() {
-  // Estados para los tipos de habla
   const [speechTypes, setSpeechTypes] = useState([
     { id: 'regular', name: 'Regular', isVisible: true }
   ]);
   const [generationText, setGenerationText] = useState('');
   const [removeSilence, setRemoveSilence] = useState(false);
+  const [speedChange, setSpeedChange] = useState(1.0);
+  const [crossFadeDuration, setCrossFadeDuration] = useState(0.15);
   const [isGenerating, setIsGenerating] = useState(false);
   const [generatedAudio, setGeneratedAudio] = useState(null);
-  const [modifiedAudio, setModifiedAudio] = useState(null); // Nuevo estado para audio modificado
+  const [modifiedAudio, setModifiedAudio] = useState(null);
+  const [transcriptionData, setTranscriptionData] = useState(null);
 
-  // Estado para almacenar los datos de audio de referencia
   const [audioData, setAudioData] = useState({
     regular: { audio: null, refText: '' }
   });
 
-  // Estado para almacenar modificaciones de prosodia
-  const [prosodyModifications, setProsodyModifications] = useState([]);
-
-  // Función para agregar un nuevo tipo de habla
   const handleAddSpeechType = () => {
     if (speechTypes.length < MAX_SPEECH_TYPES) {
       const newId = `speech-type-${speechTypes.length}`;
@@ -40,7 +38,6 @@ function MultiSpeechGenerator() {
     }
   };
 
-  // Función para eliminar un tipo de habla
   const handleDeleteSpeechType = (idToDelete) => {
     setSpeechTypes(speechTypes.filter(type => type.id !== idToDelete));
     const newAudioData = { ...audioData };
@@ -48,26 +45,25 @@ function MultiSpeechGenerator() {
     setAudioData(newAudioData);
   };
 
-  // Función para actualizar el nombre de un tipo de habla
   const handleNameUpdate = (id, newName) => {
     setSpeechTypes(speechTypes.map(type => 
       type.id === id ? { ...type, name: newName } : type
     ));
   };
 
-  // Función para manejar la carga de archivos de audio
   const handleAudioUpload = async (id, file, refText, speechType) => {
     try {
       const formData = new FormData();
       formData.append('audio', file);
       formData.append('speechType', speechType);
-  
+      formData.append('refText', refText);
+
       const response = await axios.post('http://localhost:5000/api/upload_audio', formData, {
         headers: {
           'Content-Type': 'multipart/form-data'
         }
       });
-  
+
       setAudioData({
         ...audioData,
         [id]: { 
@@ -76,7 +72,7 @@ function MultiSpeechGenerator() {
           speechType: speechType
         }
       });
-  
+
       toast.success('Audio cargado correctamente');
     } catch (error) {
       toast.error('Error al cargar el audio');
@@ -84,17 +80,14 @@ function MultiSpeechGenerator() {
     }
   };
 
-  // Función para insertar el tipo de habla en el texto
   const handleInsertSpeechType = (name) => {
     setGenerationText(prev => `${prev}{${name}} `);
   };
 
-  // Función para generar el audio multi-estilo
   const handleGenerate = async () => {
     try {
       setIsGenerating(true);
 
-      // Validar que todos los tipos de habla mencionados tengan audio
       const mentionedTypes = [...generationText.matchAll(/\{([^}]+)\}/g)]
         .map(match => match[1]);
       
@@ -109,7 +102,6 @@ function MultiSpeechGenerator() {
         return;
       }
 
-      // Preparar datos para la API
       const speechTypesData = {};
       speechTypes.forEach(type => {
         if (type.isVisible && audioData[type.id]) {
@@ -123,11 +115,14 @@ function MultiSpeechGenerator() {
       const response = await axios.post('http://localhost:5000/api/generate_multistyle_speech', {
         speech_types: speechTypesData,
         gen_text: generationText,
-        remove_silence: removeSilence
+        remove_silence: removeSilence,
+        cross_fade_duration: crossFadeDuration,
+        speed_change: speedChange
       });
 
       setGeneratedAudio(response.data.audio_path);
-      setModifiedAudio(null); // Resetear el audio modificado
+      setModifiedAudio(null);
+      setTranscriptionData(null);
       toast.success('Audio generado correctamente');
     } catch (error) {
       toast.error('Error al generar el audio');
@@ -137,7 +132,24 @@ function MultiSpeechGenerator() {
     }
   };
 
-  // Función para manejar las modificaciones de prosodia
+  useEffect(() => {
+    if (generatedAudio) {
+      const analyzeAudio = async () => {
+        try {
+          const response = await axios.post('http://localhost:5000/api/analyze_audio', {
+            audio_path: generatedAudio
+          });
+          setTranscriptionData(response.data);
+          toast.success('Transcripción con timestamps obtenida');
+        } catch (error) {
+          toast.error('Error al obtener transcripción');
+          console.error('Error:', error);
+        }
+      };
+      analyzeAudio();
+    }
+  }, [generatedAudio]);
+
   const handleApplyProsody = async (modifications) => {
     if (!generatedAudio) {
       toast.error('No hay audio generado para modificar');
@@ -198,7 +210,6 @@ function MultiSpeechGenerator() {
           </div>
         </div>
 
-        {/* Tipos de habla */}
         <div className="space-y-6">
           {speechTypes.map((type) => (
             type.isVisible && (
@@ -218,7 +229,6 @@ function MultiSpeechGenerator() {
           ))}
         </div>
 
-        {/* Botón para agregar tipo de habla */}
         <button
           onClick={handleAddSpeechType}
           className="mt-4 px-4 py-2 bg-blue-600 text-white rounded hover:bg-blue-700 transition"
@@ -226,7 +236,6 @@ function MultiSpeechGenerator() {
           Agregar Tipo de Habla
         </button>
 
-        {/* Área de texto para generación */}
         <div className="mt-6">
           <label className="block text-sm font-medium text-gray-700 mb-2">
             Texto para Generar
@@ -239,48 +248,106 @@ function MultiSpeechGenerator() {
           />
         </div>
 
-        {/* Configuraciones avanzadas */}
-        <div className="mt-4">
-          <label className="flex items-center space-x-2">
-            <input
-              type="checkbox"
-              checked={removeSilence}
-              onChange={(e) => setRemoveSilence(e.target.checked)}
-              className="rounded border-gray-300"
+        <div className="mt-6 bg-gray-100 p-4 rounded-lg">
+          <h3 className="text-lg font-semibold mb-4">Configuraciones Avanzadas</h3>
+          
+          <div className="mb-4">
+            <label className="block text-sm font-medium text-gray-700 mb-1">
+              Texto de Referencia
+            </label>
+            <textarea
+              value={''}
+              onChange={() => {}}
+              className="w-full h-24 p-3 border rounded-md"
+              placeholder="Deja en blanco para transcribir automáticamente el audio de referencia..."
+              disabled
             />
-            <span className="text-sm text-gray-700">Eliminar Silencios</span>
-          </label>
+            <p className="text-xs text-gray-500 mt-1">
+              Deja en blanco para transcribir automáticamente el audio de referencia...
+            </p>
+          </div>
+
+          <div className="mb-4">
+            <label className="flex items-center space-x-2">
+              <input
+                type="checkbox"
+                checked={removeSilence}
+                onChange={(e) => setRemoveSilence(e.target.checked)}
+                className="rounded border-gray-300"
+              />
+              <span className="text-sm text-gray-700">Eliminar Silencios</span>
+            </label>
+            <p className="text-xs text-gray-500 mt-1">
+              El modelo tiende a producir silencios... Esta opción los elimina.
+            </p>
+          </div>
+
+          <div className="mb-4">
+            <label className="block text-sm font-medium text-gray-700 mb-1">
+              Velocidad ({speedChange.toFixed(1)}x)
+            </label>
+            <input
+              type="range"
+              step="0.1"
+              min="0.3"
+              max="2.0"
+              value={speedChange}
+              onChange={(e) => setSpeedChange(parseFloat(e.target.value))}
+              className="w-full"
+            />
+            <p className="text-xs text-gray-500 mt-1">
+              Ajusta la velocidad del audio. (1.0 = normal)
+            </p>
+          </div>
+
+          <div className="mb-4">
+            <label className="block text-sm font-medium text-gray-700 mb-1">
+              Duración del Cross-Fade (s) ({crossFadeDuration.toFixed(2)}s)
+            </label>
+            <input
+              type="range"
+              step="0.05"
+              min="0"
+              max="1"
+              value={crossFadeDuration}
+              onChange={(e) => setCrossFadeDuration(parseFloat(e.target.value))}
+              className="w-full"
+            />
+            <p className="text-xs text-gray-500 mt-1">
+              Establece la duración del cross-fade entre clips de audio.
+            </p>
+          </div>
         </div>
 
-        {/* Botón de generación */}
         <button
           onClick={handleGenerate}
           disabled={isGenerating}
           className={`mt-6 px-6 py-3 bg-green-600 text-white rounded-lg font-medium
-            ${isGenerating ? 'opacity-50 cursor-not-allowed' : 'hover:bg-green-700'} 
-            transition`}
+            ${isGenerating ? 'opacity-50 cursor-not-allowed' : 'hover:bg-green-700'} transition`}
         >
           {isGenerating ? 'Generando...' : 'Generar Habla Multi-Estilo'}
         </button>
 
-        {/* Reproductor de audio generado */}
         {generatedAudio && (
           <div className="mt-6">
             <h3 className="text-lg font-medium mb-2">Audio Generado:</h3>
-            <AudioPlayer audioUrl={`http://localhost:5000/api/get_audio/${generatedAudio}`} />
+            <AudioPlayer audioUrl={`http://localhost:5000/api/get_audio/${encodeURIComponent(generatedAudio)}`} />
           </div>
         )}
 
-        {/* Componente para Modificar Prosodia */}
-        {generatedAudio && (
-          <ProsodyModifier onAddModification={handleApplyProsody} />
+        {generatedAudio && transcriptionData && (
+          <ProsodyModifier 
+            onAddModification={handleApplyProsody} 
+            generatedAudio={generatedAudio} 
+            transcriptionData={transcriptionData}
+            refText={generationText} 
+          />
         )}
 
-        {/* Reproductor de audio modificado */}
         {modifiedAudio && (
           <div className="mt-6">
             <h3 className="text-lg font-medium mb-2">Audio Modificado:</h3>
-            <AudioPlayer audioUrl={`http://localhost:5000/api/get_audio/${modifiedAudio}`} />
+            <AudioPlayer audioUrl={`http://localhost:5000/api/get_audio/${encodeURIComponent(modifiedAudio)}`} />
           </div>
         )}
       </div>

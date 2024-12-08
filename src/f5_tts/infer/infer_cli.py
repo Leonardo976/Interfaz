@@ -9,6 +9,9 @@ import numpy as np
 import soundfile as sf
 import tomli
 from cached_path import cached_path
+from analyze_audio import analyze_bp
+app.register_blueprint(analyze_bp)
+
 
 from f5_tts.infer.utils_infer import (
     infer_process,

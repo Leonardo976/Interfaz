@@ -1,11 +1,8 @@
-// src/components/MultiSpeechGenerator.jsx
-
 import React, { useState, useEffect } from 'react';
 import axios from 'axios';
 import toast from 'react-hot-toast';
 import SpeechTypeInput from './SpeechTypeInput';
 import AudioPlayer from './AudioPlayer';
-import ProsodyModifier from './ProsodyModifier';
 
 const MAX_SPEECH_TYPES = 100;
 
@@ -19,8 +16,11 @@ function MultiSpeechGenerator() {
   const [crossFadeDuration, setCrossFadeDuration] = useState(0.15);
   const [isGenerating, setIsGenerating] = useState(false);
   const [generatedAudio, setGeneratedAudio] = useState(null);
-  const [modifiedAudio, setModifiedAudio] = useState(null);
   const [transcriptionData, setTranscriptionData] = useState(null);
+
+  // Nuevo estado para controlar el botón de "Personalizar Audio"
+  const [isAnalyzing, setIsAnalyzing] = useState(false);
+  const [analyzeDone, setAnalyzeDone] = useState(false);
 
   const [audioData, setAudioData] = useState({
     regular: { audio: null, refText: '' }
@@ -121,8 +121,8 @@ function MultiSpeechGenerator() {
       });
 
       setGeneratedAudio(response.data.audio_path);
-      setModifiedAudio(null);
       setTranscriptionData(null);
+      setAnalyzeDone(false); // Permitir personalizar si se desea
       toast.success('Audio generado correctamente');
     } catch (error) {
       toast.error('Error al generar el audio');
@@ -132,47 +132,29 @@ function MultiSpeechGenerator() {
     }
   };
 
-  useEffect(() => {
-    if (generatedAudio) {
-      const analyzeAudio = async () => {
-        try {
-          const response = await axios.post('http://localhost:5000/api/analyze_audio', {
-            audio_path: generatedAudio
-          });
-          setTranscriptionData(response.data);
-          toast.success('Transcripción con timestamps obtenida');
-        } catch (error) {
-          toast.error('Error al obtener transcripción');
-          console.error('Error:', error);
-        }
-      };
-      analyzeAudio();
-    }
-  }, [generatedAudio]);
-
-  const handleApplyProsody = async (modifications) => {
+  const handleAnalyzeAudio = async () => {
     if (!generatedAudio) {
-      toast.error('No hay audio generado para modificar');
+      toast.error('No hay audio generado para analizar.');
       return;
     }
 
     try {
-      const response = await axios.post('http://localhost:5000/api/modify_prosody', {
-        audio_path: generatedAudio,
-        modifications: modifications.map(mod => ({
-          start_time: mod.start_time,
-          end_time: mod.end_time,
-          pitch_shift: mod.pitch_shift,
-          volume_change: mod.volume_change,
-          speed_change: mod.speed_change
-        }))
+      setIsAnalyzing(true);
+      const response = await axios.post('http://localhost:5000/api/analyze_audio', {
+        audio_path: generatedAudio
       });
-
-      setModifiedAudio(response.data.output_audio_path);
-      toast.success('Prosodia modificada correctamente');
+      setTranscriptionData(response.data);
+      if(response.data.success) {
+        toast.success('Transcripción con timestamps obtenida');
+        setAnalyzeDone(true); // Ya se obtuvo la transcripción, ocultar el botón
+      } else {
+        toast.error('Error al obtener transcripción');
+      }
     } catch (error) {
-      toast.error('Error al modificar la prosodia');
+      toast.error('Error al obtener transcripción');
       console.error('Error:', error);
+    } finally {
+      setIsAnalyzing(false);
     }
   };
 
@@ -189,7 +171,7 @@ function MultiSpeechGenerator() {
             <div className="bg-gray-50 p-4 rounded">
               <p className="font-medium mb-2">Ejemplo 1:</p>
               <pre className="whitespace-pre-wrap text-sm">
-                {`{Regular} Hola, me gustaría pedir un sándwich, por favor.
+{`{Regular} Hola, me gustaría pedir un sándwich, por favor.
 {Sorprendido} ¿Qué quieres decir con que no tienen pan?
 {Triste} Realmente quería un sándwich...
 {Enojado} ¡Sabes qué, maldición a ti y a tu pequeña tienda!
@@ -201,7 +183,7 @@ function MultiSpeechGenerator() {
             <div className="bg-gray-50 p-4 rounded">
               <p className="font-medium mb-2">Ejemplo 2:</p>
               <pre className="whitespace-pre-wrap text-sm">
-                {`{Speaker1_Feliz} Hola, me gustaría pedir un sándwich, por favor.
+{`{Speaker1_Feliz} Hola, me gustaría pedir un sándwich, por favor.
 {Speaker2_Regular} Lo siento, nos hemos quedado sin pan.
 {Speaker1_Triste} Realmente quería un sándwich...
 {Speaker2_Susurro} Te daré el último que estaba escondiendo.`}
@@ -332,22 +314,27 @@ function MultiSpeechGenerator() {
           <div className="mt-6">
             <h3 className="text-lg font-medium mb-2">Audio Generado:</h3>
             <AudioPlayer audioUrl={`http://localhost:5000/api/get_audio/${encodeURIComponent(generatedAudio)}`} />
+            {/* Mostrar el botón "Personalizar Audio" solo si no se ha terminado el análisis */}
+            {!analyzeDone && (
+              <button
+                onClick={handleAnalyzeAudio}
+                disabled={isAnalyzing}
+                className={`mt-4 px-4 py-2 rounded text-white transition ${
+                  isAnalyzing
+                    ? 'bg-purple-400 cursor-not-allowed'
+                    : 'bg-purple-600 hover:bg-purple-700'
+                }`}
+              >
+                {isAnalyzing ? 'Generando Transcripción...' : 'Personalizar Audio'}
+              </button>
+            )}
           </div>
         )}
 
-        {generatedAudio && transcriptionData && (
-          <ProsodyModifier 
-            onAddModification={handleApplyProsody} 
-            generatedAudio={generatedAudio} 
-            transcriptionData={transcriptionData}
-            refText={generationText} 
-          />
-        )}
-
-        {modifiedAudio && (
+        {transcriptionData && transcriptionData.success && (
           <div className="mt-6">
-            <h3 className="text-lg font-medium mb-2">Audio Modificado:</h3>
-            <AudioPlayer audioUrl={`http://localhost:5000/api/get_audio/${encodeURIComponent(modifiedAudio)}`} />
+            <h3 className="text-lg font-medium mb-2">Transcripción Generada:</h3>
+            <p>{transcriptionData.transcription}</p>
           </div>
         )}
       </div>

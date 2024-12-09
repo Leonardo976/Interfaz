@@ -15,6 +15,8 @@ import soundfile as sf
 import torchaudio
 from pydub import AudioSegment
 import librosa
+import whisper_timestamped
+import datetime
 from prosody import modify_prosody
 from f5_tts.model import DiT, UNetT
 from f5_tts.infer.utils_infer import (
@@ -40,9 +42,6 @@ except ImportError:
 
 app = Flask(__name__)
 CORS(app)
-
-from analyze_audio import analyze_bp
-app.register_blueprint(analyze_bp)
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -85,6 +84,24 @@ def save_speech_types():
     except Exception as e:
         logger.error(f"Error al guardar archivo JSON: {str(e)}")
         raise
+
+def transcribe_audio_with_timestamps(audio_path, language='es'):
+    try:
+        audio = whisper_timestamped.load_audio(audio_path)
+        # Usamos el modelo "openai/whisper-large-v2"
+        model = whisper_timestamped.load_model("openai/whisper-large-v2", device="cpu")
+        result = whisper_timestamped.transcribe(model, audio, language=language)
+
+        formatted_transcript = ""
+        for segment in result['segments']:
+            for word in segment['words']:
+                formatted_time = f"({word['start']:.2f})"
+                formatted_transcript += f"{formatted_time} {word['text']} "
+        
+        return formatted_transcript.strip()
+    except Exception as e:
+        logger.exception(f"Error en la transcripción: {str(e)}")
+        return None
 
 def load_speech_types():
     global speech_types_dict
@@ -178,6 +195,28 @@ def infer(
         logger.exception(f"Error en infer: {str(e)}")
         raise
 
+@app.route('/api/analyze_audio', methods=['POST'])
+def analyze_audio():
+    try:
+        data = request.get_json()
+        audio_path = data.get('audio_path', '')
+        if not audio_path or not os.path.exists(audio_path):
+            return jsonify({'success': False, 'error': 'audio_path no válido'}), 400
+        
+        transcription = transcribe_audio_with_timestamps(audio_path, language='es')
+        if transcription is None:
+            return jsonify({'success': False, 'error': 'Error en transcripción'}), 500
+        
+        return jsonify({
+            'success': True,
+            'transcription': transcription
+        }), 200
+    except Exception as e:
+        return jsonify({
+            'success': False,
+            'error': str(e)
+        }), 500
+
 def parse_speechtypes_text(gen_text):
     pattern = r"\{(.*?)\}"
     tokens = re.split(pattern, gen_text)
@@ -222,7 +261,6 @@ def upload_audio():
         if not os.path.exists(UPLOAD_FOLDER):
             os.makedirs(UPLOAD_FOLDER)
         
-        import time
         timestamp = int(time.time())
         filename = secure_filename(f"{speech_type}_{timestamp}_{file.filename}")
         filepath = os.path.join(app.config['UPLOAD_FOLDER'], filename)
@@ -264,74 +302,17 @@ def upload_audio():
         logger.exception(f"Error general en upload_audio: {str(e)}")
         return jsonify({'error': f'Error al procesar la solicitud: {str(e)}'}), 500
 
-@app.route('/api/generate_speech', methods=['POST'])
-def generate_speech():
-    try:
-        data = request.json
-        speech_type = data.get('speechType', 'Regular')
-        gen_text = data.get('gen_text')
-        remove_silence = data.get('remove_silence', False)
-        cross_fade_duration = data.get('cross_fade_duration', 0.15)
-        speed = data.get('speed_change', 1.0)
-        ref_text = data.get('refText', '')
-        
-        if not speech_type or not gen_text:
-            logger.error('speechType y gen_text son requeridos')
-            return jsonify({'error': 'speechType y gen_text son requeridos'}), 400
-    
-        if speech_type not in speech_types_dict:
-            logger.error(f'Tipo de habla no encontrado: {speech_type}')
-            return jsonify({'error': f'Tipo de habla no encontrado: {speech_type}'}), 400
-    
-        speech_type_data = speech_types_dict[speech_type]
-        ref_audio = speech_type_data['audio']
-        ref_text_original = speech_type_data.get('ref_text', '')
-        
-        # Si no se proporciona ref_text, usar el original almacenado.
-        if ref_text:
-            ref_text = ref_text
-        else:
-            ref_text = ref_text_original
-    
-        if not os.path.exists(ref_audio):
-            logger.error(f'Archivo de audio no encontrado: {ref_audio}')
-            return jsonify({'error': f'Archivo de audio no encontrado: {ref_audio}'}), 404
-    
-        audio, spectrogram_path = infer(
-            ref_audio,
-            ref_text,
-            gen_text,
-            F5TTS_ema_model,
-            remove_silence,
-            cross_fade_duration=cross_fade_duration,
-            speed=speed
-        )
-    
-        temp_audio_path = tempfile.mktemp(suffix='.wav')
-        sf.write(temp_audio_path, audio[1], audio[0])
-    
-        logger.info(f"Audio generado guardado en: {temp_audio_path}")
-        logger.info(f"Espectrograma generado guardado en: {spectrogram_path}")
-    
-        return jsonify({
-            'audio_path': temp_audio_path,
-            'spectrogram_path': spectrogram_path
-        })
-    
-    except Exception as e:
-        logger.exception(f"Error al generar habla: {str(e)}")
-        return jsonify({'error': f'Error al generar habla: {str(e)}'}), 500
-
 @app.route('/api/generate_multistyle_speech', methods=['POST'])
 def generate_multistyle_speech():
     try:
         data = request.json
-        gen_text = data.get('gen_text')
+        gen_text = data.get('gen_text', 'Este es un texto por defecto para generar audio.')
         remove_silence = data.get('remove_silence', False)
         cross_fade_duration = data.get('cross_fade_duration', 0.15)
         speed = data.get('speed_change', 1.0)
         ref_text_overrides = data.get('ref_text_overrides', {})
-    
+        just_audio = data.get('just_audio', False)  # si es True, solo genera audio y no transcribe
+
         if not gen_text:
             logger.error('gen_text es requerido')
             return jsonify({'error': 'gen_text es requerido'}), 400
@@ -339,6 +320,9 @@ def generate_multistyle_speech():
         segments = parse_speechtypes_text(gen_text)
         logger.info(f"Segmentos obtenidos: {segments}")
         
+        if "Regular" not in speech_types_dict:
+            return jsonify({'error': 'No existe tipo de habla Regular configurado.'}), 400
+
         for segment in segments:
             style = segment["style"]
             if style not in speech_types_dict:
@@ -360,8 +344,8 @@ def generate_multistyle_speech():
             speech_type_data = speech_types_dict[style]
             ref_audio = speech_type_data['audio']
             ref_text_original = speech_type_data.get('ref_text', '')
-            ref_text = ref_text_overrides.get(style, ref_text_original)
-    
+            ref_text = ref_text_original
+
             audio, _ = infer(
                 ref_audio,
                 ref_text,
@@ -383,8 +367,9 @@ def generate_multistyle_speech():
             
             temp_audio_path = tempfile.mktemp(suffix='.wav')
             sf.write(temp_audio_path, final_audio_data, sample_rate)
-            logger.info(f"Audio final multi-estilo guardado en: {temp_audio_path}")
             
+            # Solo devolvemos el audio_path, sin transcribir
+            logger.info(f"Audio final multi-estilo guardado en: {temp_audio_path}")
             return jsonify({
                 'audio_path': temp_audio_path
             })
@@ -396,58 +381,51 @@ def generate_multistyle_speech():
         logger.exception(f'Error en generación multi-estilo: {str(e)}')
         return jsonify({'error': f'Error en generación multi-estilo: {str(e)}'}), 500
 
-@app.route('/api/modify_prosody', methods=['POST'])
-def modify_prosody_route():
+
+@app.route('/api/generate_timestamps_from_audio', methods=['POST'])
+def generate_timestamps_from_audio():
     try:
         data = request.json
         audio_path = data.get('audio_path')
-        modifications = data.get('modifications')
-        remove_silence = data.get('remove_silence', False)
-        min_silence_len = data.get('min_silence_len', 500)
-        silence_thresh = data.get('silence_thresh', -40)
-        keep_silence = data.get('keep_silence', 250)
-        cross_fade_duration = data.get('cross_fade_duration', 0.15)
-        speed_change = data.get('speed_change', 1.0)
-    
-        logger.info(f"Recibido audio_path: {audio_path}")
-        logger.info(f"Recibidas modificaciones: {modifications}")
-        logger.info(f"Remove silence: {remove_silence}")
-        logger.info(f"Min silence length: {min_silence_len} ms")
-        logger.info(f"Silence threshold: {silence_thresh} dBFS")
-        logger.info(f"Keep silence: {keep_silence} ms")
-        logger.info(f"Cross-fade duration: {cross_fade_duration} s")
-        logger.info(f"Speed change: {speed_change}")
-    
-        if not audio_path or not modifications:
-            logger.error('audio_path y modifications son requeridos')
-            return jsonify({'error': 'audio_path y modifications son requeridos'}), 400
-    
-        if not os.path.exists(audio_path):
-            logger.error(f'Archivo de audio no encontrado: {audio_path}')
-            return jsonify({'error': f'Archivo de audio no encontrado: {audio_path}'}), 404
-    
-        try:
-            output_path = modify_prosody(
-                audio_path=audio_path,
-                modifications=modifications,
-                remove_silence=remove_silence,
-                min_silence_len=min_silence_len,
-                silence_thresh=silence_thresh,
-                keep_silence=keep_silence,
-                cross_fade_duration=cross_fade_duration,
-                global_speed_change=speed_change,
-                output_path=None
-            )
-            logger.info(f'Prosodia modificada guardada en: {output_path}')
-        except Exception as e:
-            logger.exception(f'Error al modificar la prosodia: {str(e)}')
-            return jsonify({'error': f'Error al modificar la prosodia: {str(e)}'}), 500
 
-        return jsonify({'output_audio_path': output_path}), 200
+        if not audio_path or not os.path.exists(audio_path):
+            return jsonify({'error': 'audio_path no válido'}), 400
+
+        transcription = transcribe_audio_with_timestamps(audio_path)
+        logger.info(f"Transcripción generada: {transcription}")
+
+        final_text = (
+            f"INFO:__main__:Audio final multi-estilo guardado en: {audio_path}\n"
+            f"INFO:__main__:Transcripción generada: {transcription}"
+        )
+
+        return jsonify({
+            'audio_path': audio_path,
+            'transcription': final_text
+        })
 
     except Exception as e:
-        logger.exception(f"Error al procesar /api/modify_prosody: {str(e)}")
-        return jsonify({'error': str(e)}), 500
+        logger.exception(f'Error al generar marcas de tiempo desde audio: {str(e)}')
+        return jsonify({'error': f'Error al generar marcas de tiempo: {str(e)}'}), 500
+
+
+@app.route('/api/modify_prosody', methods=['POST'])
+def modify_prosody_route():
+    data = request.json
+    audio_path = data.get('audio_path')
+    modifications = data.get('modifications', [])
+
+    if not audio_path or not os.path.exists(audio_path):
+        return jsonify({'error': 'audio_path no válido'}), 400
+
+    try:
+        output_audio_path = modify_prosody(audio_path, modifications)
+        return jsonify({
+            'output_audio_path': output_audio_path
+        })
+    except Exception as e:
+        logger.exception(f'Error al modificar la prosodia: {str(e)}')
+        return jsonify({'error': f'Error al modificar la prosodia: {str(e)}'}), 500
 
 @app.route('/api/get_audio/<path:filename>')
 def get_audio(filename):

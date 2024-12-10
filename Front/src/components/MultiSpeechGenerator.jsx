@@ -31,6 +31,9 @@ function MultiSpeechGenerator() {
     regular: { audio: null, refText: '' }
   });
 
+  // Estado para manejar la lista de audios generados
+  const [generatedAudios, setGeneratedAudios] = useState([]);
+
   const handleAddSpeechType = () => {
     if (speechTypes.length < MAX_SPEECH_TYPES) {
       const newId = `speech-type-${speechTypes.length}`;
@@ -64,16 +67,20 @@ function MultiSpeechGenerator() {
         headers: { 'Content-Type': 'multipart/form-data' }
       });
 
-      setAudioData({
-        ...audioData,
-        [id]: { 
-          audio: response.data.filepath,
-          refText: refText,
-          speechType: speechType
-        }
-      });
+      if (response.data.success) {
+        setAudioData({
+          ...audioData,
+          [id]: { 
+            audio: response.data.filepath,
+            refText: refText,
+            speechType: speechType
+          }
+        });
 
-      toast.success('Audio cargado correctamente');
+        toast.success('Audio cargado correctamente');
+      } else {
+        toast.error(response.data.message || 'Error al cargar el audio');
+      }
     } catch (error) {
       toast.error('Error al cargar el audio');
       console.error('Error:', error);
@@ -118,10 +125,15 @@ function MultiSpeechGenerator() {
         speed_change: speedChange
       });
 
-      setGeneratedAudio(response.data.audio_path);
-      setTranscriptionData(null);
-      setAnalyzeDone(false);
-      toast.success('Audio generado correctamente');
+      if (response.data.success && response.data.audio_path) {
+        setGeneratedAudio(response.data.audio_path);
+        setGeneratedAudios(prev => [...prev, response.data.audio_path]); // Añadir a la lista de audios generados
+        setTranscriptionData(null);
+        setAnalyzeDone(false);
+        toast.success('Audio generado correctamente');
+      } else {
+        toast.error(response.data.message || 'Error al generar el audio');
+      }
     } catch (error) {
       toast.error('Error al generar el audio');
       console.error('Error:', error);
@@ -298,8 +310,9 @@ function MultiSpeechGenerator() {
         modifications
       });
       if (response.data.output_audio_path) {
-        toast.success('Prosodia generada con éxito');
         setModifiedAudio(response.data.output_audio_path);
+        setGeneratedAudios(prev => [...prev, response.data.output_audio_path]); // Añadir a la lista de audios generados
+        toast.success('Prosodia generada con éxito');
       } else {
         toast.error('Error al generar prosodia');
       }
@@ -308,6 +321,40 @@ function MultiSpeechGenerator() {
       console.error(error);
     } finally {
       setIsProsodyGenerating(false);
+    }
+  };
+
+  // Nueva función para eliminar audios generados
+  const handleDeleteAudio = async (audioPath) => {
+    const confirmDelete = window.confirm('¿Estás seguro de que deseas eliminar este audio?');
+
+    if (!confirmDelete) return;
+
+    try {
+      const response = await axios.post('http://localhost:5000/api/delete_audio', {
+        audio_path: audioPath
+      });
+
+      if (response.data.success) {
+        // Actualizar la lista de audios generados eliminando el audio eliminado
+        setGeneratedAudios(prev => prev.filter(path => path !== audioPath));
+
+        // Si el audio eliminado es el actualmente seleccionado, limpiar el estado
+        if (generatedAudio === audioPath) {
+          setGeneratedAudio(null);
+        }
+
+        if (modifiedAudio === audioPath) {
+          setModifiedAudio(null);
+        }
+
+        toast.success('Audio eliminado correctamente');
+      } else {
+        toast.error(response.data.message || 'Error al eliminar el audio');
+      }
+    } catch (error) {
+      toast.error('Error al eliminar el audio');
+      console.error('Error:', error);
     }
   };
 
@@ -431,9 +478,32 @@ function MultiSpeechGenerator() {
           {isGenerating ? 'Generando...' : 'Generar Habla Multi-Estilo'}
         </button>
 
+        {/* Lista de Audios Generados con Opciones para Reproducir y Eliminar */}
+        {generatedAudios.length > 0 && (
+          <div className="mt-6">
+            <h3 className="text-lg font-medium mb-2">Audios Generados:</h3>
+            <ul className="space-y-4">
+              {generatedAudios.map((audioPath, index) => (
+                <li key={index} className="flex items-center justify-between bg-gray-100 p-4 rounded">
+                  <div className="flex items-center space-x-4">
+                    <AudioPlayer audioUrl={`http://localhost:5000/api/get_audio/${encodeURIComponent(audioPath)}`} />
+                    <span className="text-sm text-gray-700">{audioPath.split('/').pop()}</span>
+                  </div>
+                  <button
+                    onClick={() => handleDeleteAudio(audioPath)}
+                    className="px-3 py-1 bg-red-600 text-white rounded hover:bg-red-700 transition"
+                  >
+                    Eliminar
+                  </button>
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
+
         {generatedAudio && (
           <div className="mt-6">
-            <h3 className="text-lg font-medium mb-2">Audio Generado:</h3>
+            <h3 className="text-lg font-medium mb-2">Audio Generado Principal:</h3>
             <AudioPlayer audioUrl={`http://localhost:5000/api/get_audio/${encodeURIComponent(generatedAudio)}`} />
             {!analyzeDone && (
               <button
@@ -481,6 +551,12 @@ function MultiSpeechGenerator() {
           <div className="mt-6">
             <h3 className="text-lg font-medium mb-2">Audio con Prosodia Aplicada:</h3>
             <AudioPlayer audioUrl={`http://localhost:5000/api/get_audio/${encodeURIComponent(modifiedAudio)}`} />
+            <button
+              onClick={() => handleDeleteAudio(modifiedAudio)}
+              className="mt-4 px-3 py-1 bg-red-600 text-white rounded hover:bg-red-700 transition"
+            >
+              Eliminar
+            </button>
           </div>
         )}
       </div>

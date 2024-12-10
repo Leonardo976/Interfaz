@@ -1,4 +1,4 @@
-import re
+import re 
 import tempfile
 import os
 import json
@@ -30,6 +30,7 @@ from f5_tts.infer.utils_infer import (
 from apscheduler.schedulers.background import BackgroundScheduler
 import atexit
 from huggingface_hub import hf_hub_download
+import uuid  # <-- Importación añadida
 
 import torchvision
 torchvision.disable_beta_transforms_warning()
@@ -47,10 +48,15 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 UPLOAD_FOLDER = 'temp_uploads'
+GENERATED_AUDIO_FOLDER = 'generated_audios'
 SPEECH_TYPES_FILE = 'speech_types.json'
-if not os.path.exists(UPLOAD_FOLDER):
-    os.makedirs(UPLOAD_FOLDER)
+
+# Crear las carpetas si no existen
+os.makedirs(UPLOAD_FOLDER, exist_ok=True)
+os.makedirs(GENERATED_AUDIO_FOLDER, exist_ok=True)
+
 app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
+app.config['GENERATED_AUDIO_FOLDER'] = GENERATED_AUDIO_FOLDER
 app.config['MAX_CONTENT_LENGTH'] = None
 
 try:
@@ -365,12 +371,16 @@ def generate_multistyle_speech():
         if generated_audio_segments:
             final_audio_data = np.concatenate(generated_audio_segments)
             
-            temp_audio_path = tempfile.mktemp(suffix='.wav')
-            sf.write(temp_audio_path, final_audio_data, sample_rate)
+            # Generar una ruta única para el audio generado
+            generated_audio_filename = f"multi_style_{uuid.uuid4().hex}.wav"
+            generated_audio_path = os.path.join(app.config['GENERATED_AUDIO_FOLDER'], generated_audio_filename)
             
-            logger.info(f"Audio final multi-estilo guardado en: {temp_audio_path}")
+            sf.write(generated_audio_path, final_audio_data, sample_rate)
+            
+            logger.info(f"Audio final multi-estilo guardado en: {generated_audio_path}")
             return jsonify({
-                'audio_path': temp_audio_path
+                'success': True,
+                'audio_path': generated_audio_path
             })
         else:
             logger.error('No se generó audio')
@@ -425,18 +435,59 @@ def modify_prosody_route():
         return jsonify({'error': 'audio_path no válido'}), 400
 
     try:
-        output_audio_path = modify_prosody(audio_path, modifications)
-        return jsonify({
-            'output_audio_path': output_audio_path
-        })
+        # Generar una ruta única para el audio modificado
+        modified_audio_filename = f"modified_{uuid.uuid4().hex}.wav"
+        modified_audio_path = os.path.join(app.config['GENERATED_AUDIO_FOLDER'], modified_audio_filename)
+
+        # Llamar a la función de modificación de prosodia sin parámetros adicionales
+        modify_prosody(
+            audio_path=audio_path,
+            modifications=modifications,
+            output_path=modified_audio_path
+        )
+        
+        return jsonify({'success': True, 'output_audio_path': modified_audio_path}), 200
     except Exception as e:
         logger.exception(f'Error al modificar la prosodia: {e}')
-        return jsonify({'error': f'Error al modificar la prosodia: {e}'}), 500
+        return jsonify({'success': False, 'message': f'Error al modificar la prosodia: {e}'}), 500
+
+@app.route('/api/delete_audio', methods=['POST'])
+def delete_audio():
+    """
+    Endpoint para eliminar un archivo de audio generado.
+    Recibe JSON con 'audio_path'.
+    """
+    data = request.get_json()
+    audio_path = data.get('audio_path', '')
+
+    if not audio_path:
+        return jsonify({'success': False, 'message': 'No se proporcionó la ruta del audio.'}), 400
+
+    # Asegurar que la ruta es segura y pertenece a GENERATED_AUDIO_FOLDER
+    secure_path = secure_filename(os.path.basename(audio_path))
+    full_path = os.path.join(app.config['GENERATED_AUDIO_FOLDER'], secure_path)
+
+    if not os.path.exists(full_path):
+        return jsonify({'success': False, 'message': 'El archivo de audio no existe.'}), 404
+
+    try:
+        os.remove(full_path)
+        logger.info(f"Audio eliminado: {full_path}")
+        return jsonify({'success': True, 'message': 'Audio eliminado correctamente.'}), 200
+    except Exception as e:
+        logger.exception(f"Error al eliminar el audio: {e}")
+        return jsonify({'success': False, 'message': f'Error al eliminar el audio: {str(e)}'}), 500
 
 @app.route('/api/get_audio/<path:filename>')
 def get_audio(filename):
     try:
-        return send_file(filename, mimetype='audio/wav')
+        # Verificar que el archivo existe en GENERATED_AUDIO_FOLDER
+        secure_path = secure_filename(os.path.basename(filename))
+        full_path = os.path.join(app.config['GENERATED_AUDIO_FOLDER'], secure_path)
+        if not os.path.exists(full_path):
+            logger.error(f"Archivo de audio no encontrado: {full_path}")
+            return jsonify({'error': 'Archivo de audio no encontrado.'}), 404
+        return send_file(full_path, mimetype='audio/wav')
     except Exception as e:
         logger.exception(f"Error al servir archivo de audio {filename}: {str(e)}")
         return jsonify({'error': str(e)}), 404
@@ -444,7 +495,13 @@ def get_audio(filename):
 @app.route('/api/get_spectrogram/<path:filename>')
 def get_spectrogram(filename):
     try:
-        return send_file(filename, mimetype='image/png')
+        # Verificar que el archivo existe
+        secure_path = secure_filename(os.path.basename(filename))
+        full_path = os.path.join(tempfile.gettempdir(), secure_path)
+        if not os.path.exists(full_path):
+            logger.error(f"Espectrograma no encontrado: {full_path}")
+            return jsonify({'error': 'Espectrograma no encontrado.'}), 404
+        return send_file(full_path, mimetype='image/png')
     except Exception as e:
         logger.exception(f"Error al servir espectrograma {filename}: {str(e)}")
         return jsonify({'error': str(e)}), 404
@@ -461,6 +518,7 @@ def get_speech_types():
 
 def cleanup_temp_files():
     try:
+        # Limpiar archivos en UPLOAD_FOLDER que no se han modificado en la última hora
         temp_files = glob.glob(os.path.join(UPLOAD_FOLDER, '*'))
         for f in temp_files:
             try:
@@ -470,12 +528,13 @@ def cleanup_temp_files():
             except Exception as e:
                 logger.error(f"Error al limpiar el archivo {f}: {e}")
 
-        generated_audio_files = glob.glob(os.path.join(tempfile.gettempdir(), '*.wav'))
+        # Limpiar audios generados que no se han modificado en la última hora
+        generated_audio_files = glob.glob(os.path.join(GENERATED_AUDIO_FOLDER, '*.wav'))
         for f in generated_audio_files:
             try:
                 if os.path.isfile(f) and os.path.getmtime(f) < time.time() - 3600:
                     os.remove(f)
-                    logger.info(f"Archivo temporal eliminado: {f}")
+                    logger.info(f"Archivo generado eliminado: {f}")
             except Exception as e:
                 logger.error(f"Error al limpiar el archivo {f}: {e}")
     except Exception as e:

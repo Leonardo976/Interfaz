@@ -30,7 +30,8 @@ from f5_tts.infer.utils_infer import (
 from apscheduler.schedulers.background import BackgroundScheduler
 import atexit
 from huggingface_hub import hf_hub_download
-import uuid  # <-- Importación añadida
+import uuid  # <--- Importación añadida
+import pyrubberband as pyrb  # <--- Importación añadida
 
 import torchvision
 torchvision.disable_beta_transforms_warning()
@@ -411,7 +412,6 @@ def generate_timestamps_from_audio():
             'audio_path': audio_path,
             'transcription': final_text
         })
-
     except Exception as e:
         logger.exception(f'Error al generar marcas de tiempo desde audio: {str(e)}')
         return jsonify({'error': f'Error al generar marcas de tiempo: {str(e)}'}), 500
@@ -439,7 +439,7 @@ def modify_prosody_route():
         modified_audio_filename = f"modified_{uuid.uuid4().hex}.wav"
         modified_audio_path = os.path.join(app.config['GENERATED_AUDIO_FOLDER'], modified_audio_filename)
 
-        # Llamar a la función de modificación de prosodia sin parámetros adicionales
+        # Llamar a la función de modificación de prosodia
         modify_prosody(
             audio_path=audio_path,
             modifications=modifications,

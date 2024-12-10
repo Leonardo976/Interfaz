@@ -88,7 +88,7 @@ def save_speech_types():
 def transcribe_audio_with_timestamps(audio_path, language='es'):
     try:
         audio = whisper_timestamped.load_audio(audio_path)
-        # Usamos el modelo "openai/whisper-large-v2"
+        # Usamos el modelo openai/whisper-large-v2
         model = whisper_timestamped.load_model("openai/whisper-large-v2", device="cpu")
         result = whisper_timestamped.transcribe(model, audio, language=language)
 
@@ -311,7 +311,7 @@ def generate_multistyle_speech():
         cross_fade_duration = data.get('cross_fade_duration', 0.15)
         speed = data.get('speed_change', 1.0)
         ref_text_overrides = data.get('ref_text_overrides', {})
-        just_audio = data.get('just_audio', False)  # si es True, solo genera audio y no transcribe
+        just_audio = data.get('just_audio', False)
 
         if not gen_text:
             logger.error('gen_text es requerido')
@@ -368,7 +368,6 @@ def generate_multistyle_speech():
             temp_audio_path = tempfile.mktemp(suffix='.wav')
             sf.write(temp_audio_path, final_audio_data, sample_rate)
             
-            # Solo devolvemos el audio_path, sin transcribir
             logger.info(f"Audio final multi-estilo guardado en: {temp_audio_path}")
             return jsonify({
                 'audio_path': temp_audio_path
@@ -380,7 +379,6 @@ def generate_multistyle_speech():
     except Exception as e:
         logger.exception(f'Error en generación multi-estilo: {str(e)}')
         return jsonify({'error': f'Error en generación multi-estilo: {str(e)}'}), 500
-
 
 @app.route('/api/generate_timestamps_from_audio', methods=['POST'])
 def generate_timestamps_from_audio():
@@ -408,12 +406,20 @@ def generate_timestamps_from_audio():
         logger.exception(f'Error al generar marcas de tiempo desde audio: {str(e)}')
         return jsonify({'error': f'Error al generar marcas de tiempo: {str(e)}'}), 500
 
-
 @app.route('/api/modify_prosody', methods=['POST'])
 def modify_prosody_route():
     data = request.json
     audio_path = data.get('audio_path')
     modifications = data.get('modifications', [])
+
+    # Renombrar pitch_shift a pitch_semitones internamente al pasar las modificaciones
+    new_mods = []
+    for m in modifications:
+        m['pitch_semitones'] = m.pop('pitch_shift', 0)
+        m['pitch_shift'] = m.pop('pitch_semitones', 0)
+        new_mods.append(m)
+
+    modifications = new_mods
 
     if not audio_path or not os.path.exists(audio_path):
         return jsonify({'error': 'audio_path no válido'}), 400
@@ -424,8 +430,8 @@ def modify_prosody_route():
             'output_audio_path': output_audio_path
         })
     except Exception as e:
-        logger.exception(f'Error al modificar la prosodia: {str(e)}')
-        return jsonify({'error': f'Error al modificar la prosodia: {str(e)}'}), 500
+        logger.exception(f'Error al modificar la prosodia: {e}')
+        return jsonify({'error': f'Error al modificar la prosodia: {e}'}), 500
 
 @app.route('/api/get_audio/<path:filename>')
 def get_audio(filename):

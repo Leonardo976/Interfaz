@@ -1,3 +1,5 @@
+// src/components/MultiSpeechGenerator.jsx
+
 import React, { useState, useEffect } from 'react';
 import axios from 'axios';
 import toast from 'react-hot-toast';
@@ -13,14 +15,17 @@ function MultiSpeechGenerator() {
   const [generationText, setGenerationText] = useState('');
   const [removeSilence, setRemoveSilence] = useState(false);
   const [speedChange, setSpeedChange] = useState(1.0);
-  const [crossFadeDuration, setCrossFadeDuration] = useState(0.15);
+  const [crossFadeDuration, setCrossFadeDuration] = useState(0.15); 
   const [isGenerating, setIsGenerating] = useState(false);
   const [generatedAudio, setGeneratedAudio] = useState(null);
   const [transcriptionData, setTranscriptionData] = useState(null);
 
-  // Nuevo estado para controlar el botón de "Personalizar Audio"
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [analyzeDone, setAnalyzeDone] = useState(false);
+
+  const [editableTranscription, setEditableTranscription] = useState('');
+  const [isProsodyGenerating, setIsProsodyGenerating] = useState(false);
+  const [modifiedAudio, setModifiedAudio] = useState(null);
 
   const [audioData, setAudioData] = useState({
     regular: { audio: null, refText: '' }
@@ -29,10 +34,7 @@ function MultiSpeechGenerator() {
   const handleAddSpeechType = () => {
     if (speechTypes.length < MAX_SPEECH_TYPES) {
       const newId = `speech-type-${speechTypes.length}`;
-      setSpeechTypes([
-        ...speechTypes,
-        { id: newId, name: '', isVisible: true }
-      ]);
+      setSpeechTypes([...speechTypes, { id: newId, name: '', isVisible: true }]);
     } else {
       toast.error('Se ha alcanzado el límite máximo de tipos de habla');
     }
@@ -59,9 +61,7 @@ function MultiSpeechGenerator() {
       formData.append('refText', refText);
 
       const response = await axios.post('http://localhost:5000/api/upload_audio', formData, {
-        headers: {
-          'Content-Type': 'multipart/form-data'
-        }
+        headers: { 'Content-Type': 'multipart/form-data' }
       });
 
       setAudioData({
@@ -88,9 +88,7 @@ function MultiSpeechGenerator() {
     try {
       setIsGenerating(true);
 
-      const mentionedTypes = [...generationText.matchAll(/\{([^}]+)\}/g)]
-        .map(match => match[1]);
-      
+      const mentionedTypes = [...generationText.matchAll(/\{([^}]+)\}/g)].map(match => match[1]);
       const availableTypes = speechTypes
         .filter(type => type.isVisible && audioData[type.id]?.audio)
         .map(type => type.name);
@@ -122,7 +120,7 @@ function MultiSpeechGenerator() {
 
       setGeneratedAudio(response.data.audio_path);
       setTranscriptionData(null);
-      setAnalyzeDone(false); // Permitir personalizar si se desea
+      setAnalyzeDone(false);
       toast.success('Audio generado correctamente');
     } catch (error) {
       toast.error('Error al generar el audio');
@@ -146,7 +144,7 @@ function MultiSpeechGenerator() {
       setTranscriptionData(response.data);
       if(response.data.success) {
         toast.success('Transcripción con timestamps obtenida');
-        setAnalyzeDone(true); // Ya se obtuvo la transcripción, ocultar el botón
+        setAnalyzeDone(true);
       } else {
         toast.error('Error al obtener transcripción');
       }
@@ -158,6 +156,161 @@ function MultiSpeechGenerator() {
     }
   };
 
+  useEffect(() => {
+    if (transcriptionData && transcriptionData.success && transcriptionData.transcription) {
+      setEditableTranscription(transcriptionData.transcription);
+      setModifiedAudio(null);
+    }
+  }, [transcriptionData]);
+
+  /**
+   * Función para parsear las modificaciones desde el texto editable.
+   * Si hay una marca antes de la primera marca de tiempo, se aplica al audio completo.
+   */
+  const parseModificationsFromText = (text) => {
+    // Regex para encontrar marcas de tiempo
+    const timePattern = /\((\d+\.\d+)\)/g;
+    let matches = [];
+    let match;
+    while ((match = timePattern.exec(text)) !== null) {
+      matches.push({time: parseFloat(match[1]), index: match.index});
+    }
+
+    const hasMarks = (segment_text) => {
+      // Patrón insensible a mayúsculas/minúsculas para detectar marcas de prosodia
+      const tagPattern = /<(pitch|volume|velocity)\s+([\d\.]+)>/i;
+      return tagPattern.test(segment_text);
+    };
+
+    const extractMarks = (segment_text) => {
+      const result = {pitch_shift:0, volume_change:0, speed_change:1.0};
+      const tagPatternAll = /<(pitch|volume|velocity)\s+([\d\.]+)>/gi;
+      let tagM;
+      while((tagM = tagPatternAll.exec(segment_text)) !== null) {
+        const type = tagM[1].toLowerCase();
+        const val = parseFloat(tagM[2]);
+        if(type==='pitch') result.pitch_shift=val;
+        if(type==='volume') result.volume_change=val;
+        if(type==='velocity') result.speed_change=val;
+      }
+      return result;
+    };
+
+    let modifications = [];
+    let accumulatedStart = 0.0;
+
+    // Detectar si hay marcas antes de la primera marca de tiempo
+    let firstTime = (matches.length > 0) ? matches[0].time : null;
+    const textBeforeFirstTime = (matches.length > 0) ? text.substring(0, matches[0].index) : text;
+
+    // Extraer marcas antes de la primera marca de tiempo
+    let initialMarks = {pitch_shift:0, volume_change:0, speed_change:1.0};
+    if (hasMarks(textBeforeFirstTime)) {
+      initialMarks = extractMarks(textBeforeFirstTime);
+      // Aplicar la modificación desde 0.0 hasta el final del audio
+      modifications.push({
+        start_time: 0.0,
+        end_time: 9999.0, // Valor grande para indicar hasta el final; el backend lo ajustará
+        pitch_shift: initialMarks.pitch_shift,
+        volume_change: initialMarks.volume_change,
+        speed_change: initialMarks.speed_change
+      });
+      accumulatedStart = 9999.0; // No habrá acumulación después
+    }
+
+    // Iterar sobre las marcas de tiempo
+    for (let i = 0; i < matches.length; i++) {
+      const start_time = matches[i].time;
+      const start_index = matches[i].index;
+      const end_index = (i < matches.length - 1) ? matches[i+1].index : text.length;
+      const segment_text = text.substring(start_index, end_index);
+
+      if (hasMarks(segment_text)) {
+        // Extraer las marcas de esta palabra
+        const m = extractMarks(segment_text);
+
+        // Agregar un segmento sin modificar antes de esta palabra si hay espacio
+        if (start_time > accumulatedStart && accumulatedStart < 9999.0) {
+          modifications.push({
+            start_time: accumulatedStart,
+            end_time: start_time,
+            pitch_shift:0,
+            volume_change:0,
+            speed_change:1.0
+          });
+        }
+
+        // Agregar el segmento con modificación
+        const end_time = (i < matches.length - 1) ? matches[i+1].time : 9999.0; // Hasta el final si es el último
+        modifications.push({
+          start_time,
+          end_time,
+          pitch_shift: m.pitch_shift,
+          volume_change: m.volume_change,
+          speed_change: m.speed_change
+        });
+
+        // Actualizar el inicio acumulado
+        accumulatedStart = end_time;
+      }
+      // Si no hay marcas, no hacemos nada (se acumulará en el siguiente segmento)
+    }
+
+    // Si no hay marcas de tiempo pero hay marcas de prosodia, asegurar modificación completa
+    if (matches.length === 0 && hasMarks(text)) {
+      const m = extractMarks(text);
+      modifications = [{
+        start_time: 0.0,
+        end_time: 9999.0, // Valor grande para indicar hasta el final; el backend lo ajustará
+        pitch_shift: m.pitch_shift,
+        volume_change: m.volume_change,
+        speed_change: m.speed_change
+      }];
+    }
+
+    return modifications;
+  };
+
+  const handleGenerarProsodia = async () => {
+    if (!generatedAudio) {
+      toast.error('No hay audio para generar prosodia');
+      return;
+    }
+
+    if (!editableTranscription) {
+      toast.error('No hay transcripción editable');
+      return;
+    }
+
+    setIsProsodyGenerating(true);
+
+    const modifications = parseModificationsFromText(editableTranscription);
+
+    if (!modifications.length) {
+      toast.error('No se detectaron suficientes marcas o tiempos.');
+      setIsProsodyGenerating(false);
+      return;
+    }
+
+    try {
+      const response = await axios.post('http://localhost:5000/api/modify_prosody', {
+        audio_path: generatedAudio,
+        modifications
+      });
+      if (response.data.output_audio_path) {
+        toast.success('Prosodia generada con éxito');
+        setModifiedAudio(response.data.output_audio_path);
+      } else {
+        toast.error('Error al generar prosodia');
+      }
+    } catch (error) {
+      toast.error('Error al generar prosodia');
+      console.error(error);
+    } finally {
+      setIsProsodyGenerating(false);
+    }
+  };
+
   return (
     <div className="space-y-8">
       <div className="bg-white p-6 rounded-lg shadow">
@@ -166,30 +319,14 @@ function MultiSpeechGenerator() {
         </h2>
         
         <div className="mb-6">
-          <h3 className="text-lg font-semibold mb-2">Ejemplos de Formato:</h3>
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            <div className="bg-gray-50 p-4 rounded">
-              <p className="font-medium mb-2">Ejemplo 1:</p>
-              <pre className="whitespace-pre-wrap text-sm">
-{`{Regular} Hola, me gustaría pedir un sándwich, por favor.
-{Sorprendido} ¿Qué quieres decir con que no tienen pan?
-{Triste} Realmente quería un sándwich...
-{Enojado} ¡Sabes qué, maldición a ti y a tu pequeña tienda!
-{Susurro} Solo volveré a casa y lloraré ahora.
-{Gritando} ¿Por qué yo?!`}
-              </pre>
-            </div>
-            
-            <div className="bg-gray-50 p-4 rounded">
-              <p className="font-medium mb-2">Ejemplo 2:</p>
-              <pre className="whitespace-pre-wrap text-sm">
-{`{Speaker1_Feliz} Hola, me gustaría pedir un sándwich, por favor.
-{Speaker2_Regular} Lo siento, nos hemos quedado sin pan.
-{Speaker1_Triste} Realmente quería un sándwich...
-{Speaker2_Susurro} Te daré el último que estaba escondiendo.`}
-              </pre>
-            </div>
-          </div>
+          <h3 className="text-lg font-semibold mb-2">Consejos:</h3>
+          <pre className="whitespace-pre-wrap text-sm bg-gray-50 p-4 rounded">
+{`- Usa <velocity 1.5>, <pitch 2>, o <volume 1.5> en las palabras que quieras modificar.
+- Si colocas una marca antes de la primera (tiempo), se aplicará al audio completo.
+- Las palabras sin marcas se acumulan en un solo segmento sin cortes.
+- Las palabras con marca forman su propio segmento con crossfade corto.
+- Escribe las marcas sin importar mayúsculas: <Velocity 1.5> o <velocity 1.5> funcionarán igual.`}
+          </pre>
         </div>
 
         <div className="space-y-6">
@@ -234,22 +371,6 @@ function MultiSpeechGenerator() {
           <h3 className="text-lg font-semibold mb-4">Configuraciones Avanzadas</h3>
           
           <div className="mb-4">
-            <label className="block text-sm font-medium text-gray-700 mb-1">
-              Texto de Referencia
-            </label>
-            <textarea
-              value={''}
-              onChange={() => {}}
-              className="w-full h-24 p-3 border rounded-md"
-              placeholder="Deja en blanco para transcribir automáticamente el audio de referencia..."
-              disabled
-            />
-            <p className="text-xs text-gray-500 mt-1">
-              Deja en blanco para transcribir automáticamente el audio de referencia...
-            </p>
-          </div>
-
-          <div className="mb-4">
             <label className="flex items-center space-x-2">
               <input
                 type="checkbox"
@@ -278,7 +399,7 @@ function MultiSpeechGenerator() {
               className="w-full"
             />
             <p className="text-xs text-gray-500 mt-1">
-              Ajusta la velocidad del audio. (1.0 = normal)
+              Ajusta la velocidad del audio base. (1.0 = normal)
             </p>
           </div>
 
@@ -296,7 +417,7 @@ function MultiSpeechGenerator() {
               className="w-full"
             />
             <p className="text-xs text-gray-500 mt-1">
-              Establece la duración del cross-fade entre clips de audio.
+              Un pequeño crossfade (ej: 0.05s) suaviza las transiciones entre segmentos con marca.
             </p>
           </div>
         </div>
@@ -314,7 +435,6 @@ function MultiSpeechGenerator() {
           <div className="mt-6">
             <h3 className="text-lg font-medium mb-2">Audio Generado:</h3>
             <AudioPlayer audioUrl={`http://localhost:5000/api/get_audio/${encodeURIComponent(generatedAudio)}`} />
-            {/* Mostrar el botón "Personalizar Audio" solo si no se ha terminado el análisis */}
             {!analyzeDone && (
               <button
                 onClick={handleAnalyzeAudio}
@@ -333,8 +453,34 @@ function MultiSpeechGenerator() {
 
         {transcriptionData && transcriptionData.success && (
           <div className="mt-6">
-            <h3 className="text-lg font-medium mb-2">Transcripción Generada:</h3>
-            <p>{transcriptionData.transcription}</p>
+            <h3 className="text-lg font-medium mb-2">Transcripción Generada (Editable):</h3>
+            <textarea
+              className="w-full h-64 p-3 border rounded-md whitespace-pre-wrap font-mono text-sm"
+              value={editableTranscription}
+              onChange={(e) => setEditableTranscription(e.target.value)}
+            />
+            <p className="text-xs text-gray-500 mt-1">
+              - Coloca marcas &lt;pitch X&gt;, &lt;volume X&gt;, &lt;velocity X&gt; solo en las palabras que quieras modificar.<br/>
+              - Si colocas una marca antes de la primera (tiempo), se aplicará al audio completo.<br/>
+              - Las palabras sin marcas se acumulan en un solo segmento sin cortes.<br/>
+              - Las palabras con marca forman su propio segmento con crossfade corto.
+            </p>
+            <button
+              onClick={handleGenerarProsodia}
+              disabled={isProsodyGenerating}
+              className={`mt-4 px-4 py-2 rounded text-white transition ${
+                isProsodyGenerating ? 'bg-green-400 cursor-not-allowed' : 'bg-green-600 hover:bg-green-700'
+              }`}
+            >
+              {isProsodyGenerating ? 'Generando Prosodia...' : 'Generar Prosodia'}
+            </button>
+          </div>
+        )}
+
+        {modifiedAudio && (
+          <div className="mt-6">
+            <h3 className="text-lg font-medium mb-2">Audio con Prosodia Aplicada:</h3>
+            <AudioPlayer audioUrl={`http://localhost:5000/api/get_audio/${encodeURIComponent(modifiedAudio)}`} />
           </div>
         )}
       </div>

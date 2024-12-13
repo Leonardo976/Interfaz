@@ -3,9 +3,9 @@
 import os
 import tempfile
 import logging
-from scipy.io import wavfile
 import numpy as np
-from scipy.signal import stft, istft, resample
+from scipy.io import wavfile
+import librosa
 
 # Configuración básica del logging
 logging.basicConfig(level=logging.INFO)
@@ -26,7 +26,7 @@ def detect_silence(y, sr, min_silence_len=0.5, silence_thresh=-40):
     """
     # Convertir umbral de dBFS a amplitud
     threshold = 10 ** (silence_thresh / 20)
-    silence = y < threshold
+    silence = np.abs(y) < threshold
     silent_regions = []
     start = None
     min_silence_samples = int(min_silence_len * sr)
@@ -46,76 +46,38 @@ def detect_silence(y, sr, min_silence_len=0.5, silence_thresh=-40):
 
     return silent_regions
 
-def phase_vocoder(y, sr, speed=1.0):
+def change_speed_pitch(y, sr, speed=1.0, pitch=0.0):
     """
-    Aplica un phase vocoder para cambiar la velocidad del audio sin alterar el pitch.
+    Cambia la velocidad y el pitch de la señal de audio utilizando librosa.
 
     Parámetros:
     - y (np.ndarray): Señal de audio mono.
     - sr (int): Tasa de muestreo.
     - speed (float): Factor de velocidad (1.0 = sin cambio).
+    - pitch (float): Cambio de pitch en semitonos (positivo = subir, negativo = bajar).
 
     Retorna:
-    - np.ndarray: Señal de audio con velocidad modificada.
+    - np.ndarray: Señal de audio con velocidad y pitch modificados.
     """
     try:
-        # Short-Time Fourier Transform
-        f, t, Zxx = stft(y, sr, nperseg=1024, noverlap=768)
-        magnitude, phase = np.abs(Zxx), np.angle(Zxx)
+        # Validar speed_change
+        if speed <= 0:
+            logger.warning(f"speed_change={speed} es inválido. Ajustando a speed_change=0.1")
+            speed = 0.1  # Evitar speed_change=0 o negativo
 
-        # Phase accumulator
-        phase_acc = np.angle(Zxx[:, 0])
-        delta_phase = np.zeros_like(phase_acc)
+        # Cambiar la velocidad manteniendo el pitch
+        if speed != 1.0:
+            y = librosa.effects.time_stretch(y, rate=speed)
+            logger.info(f"Cambio de velocidad aplicado: {speed}x")
 
-        # Time stretching
-        num_frames = Zxx.shape[1]
-        time_steps = np.arange(0, num_frames, speed)
-        Zxx_stretched = np.zeros((len(f), len(time_steps)), dtype=complex)
+        # Cambiar el pitch manteniendo la velocidad
+        if pitch != 0.0:
+            y = librosa.effects.pitch_shift(y, sr=sr, n_steps=pitch)
+            logger.info(f"Cambio de pitch aplicado: {pitch} semitonos")
 
-        for i, step in enumerate(time_steps):
-            lower = int(np.floor(step))
-            upper = lower + 1
-            if upper >= num_frames:
-                upper = num_frames - 1
-            frac = step - lower
-            # Interpolate magnitude y phase
-            mag = (1 - frac) * magnitude[:, lower] + frac * magnitude[:, upper]
-            phs = (1 - frac) * phase[:, lower] + frac * phase[:, upper]
-            # Accumulate phase
-            delta = phs - phase_acc
-            delta = np.mod(delta + np.pi, 2 * np.pi) - np.pi  # Wrap to [-pi, pi]
-            phase_acc += delta
-            Zxx_stretched[:, i] = mag * np.exp(1j * phase_acc)
-
-        # Inverse STFT
-        _, y_stretched = istft(Zxx_stretched, sr, nperseg=1024, noverlap=768)
-        return y_stretched
-    except Exception as e:
-        logger.error(f"Error en phase_vocoder: {e}")
         return y
-
-def pitch_shift(y, sr, n_steps):
-    """
-    Cambia el pitch de la señal de audio sin alterar la velocidad.
-
-    Parámetros:
-    - y (np.ndarray): Señal de audio mono.
-    - sr (int): Tasa de muestreo.
-    - n_steps (float): Número de semitonos para cambiar el pitch.
-
-    Retorna:
-    - np.ndarray: Señal de audio con pitch modificado.
-    """
-    try:
-        factor = 2 ** (n_steps / 12.0)
-        # Time stretch by 1/factor
-        y_stretched = phase_vocoder(y, sr, speed=1/factor)
-        # Resample back to original length
-        target_length = len(y)
-        y_shifted = resample(y_stretched, target_length)
-        return y_shifted.astype(np.float32)
     except Exception as e:
-        logger.error(f"Error en pitch_shift: {e}")
+        logger.error(f"Error en change_speed_pitch con librosa: {e}")
         return y
 
 def apply_fade(segment, sr, fade_duration=0.05):
@@ -226,30 +188,19 @@ def modify_prosody(
     Retorna:
     - output_path (str): Ruta al archivo de audio modificado.
     """
+    logger.info(f"Recibiendo modificaciones: {modifications}")
+
     if not os.path.exists(audio_path):
         logger.error(f"El archivo de audio no existe: {audio_path}")
         raise FileNotFoundError(f"El archivo de audio no existe: {audio_path}")
 
     # Leer el archivo de audio
     try:
-        sr, y = wavfile.read(audio_path)
-        logger.info(f"Cargado audio desde {audio_path} con tasa de muestreo {sr} Hz y {y.shape[0]/sr:.2f}s de duración")
+        y, sr = librosa.load(audio_path, sr=None, mono=True)
+        logger.info(f"Cargado audio desde {audio_path} con tasa de muestreo {sr} Hz y {len(y)/sr:.2f}s de duración")
     except Exception as e:
         logger.error(f"Error al leer el archivo de audio: {e}")
         raise
-
-    # Normalizar si es entero
-    if y.dtype.kind == 'i':
-        y = y.astype(np.float32) / np.iinfo(y.dtype).max
-    elif y.dtype.kind == 'f':
-        y = y.astype(np.float32)
-    else:
-        logger.error("Formato de audio no soportado")
-        raise ValueError("Formato de audio no soportado")
-
-    # Convertir a mono si es estéreo
-    if y.ndim > 1:
-        y = y.mean(axis=1)
 
     # Eliminar silencios si es necesario
     if remove_silence:
@@ -283,6 +234,7 @@ def modify_prosody(
 
     # Aplicar modificaciones
     for idx, mod in enumerate(modifications):
+        logger.info(f"Procesando modificación {idx+1}: {mod}")
         start_sec = mod.get('start_time', 0.0)
         end_sec = mod.get('end_time', 0.0)
         pitch_shift_steps = mod.get('pitch_shift', 0.0)
@@ -306,8 +258,10 @@ def modify_prosody(
         # Agregar segmento sin modificar si hay un gap
         if start_sec > last_end_sec:
             try:
+                # Asegurarse de que los índices sean enteros
                 unmodified_segment = y[int(last_end_sec * sr) : start_sample]
                 segments.append(unmodified_segment)
+                logger.info(f"Agregado segmento sin modificar: {last_end_sec}s a {start_sec}s")
             except Exception as e:
                 logger.error(f"Error al agregar segmento sin modificar: {e}")
                 raise RuntimeError(f"Error al agregar segmento sin modificar: {e}")
@@ -315,29 +269,29 @@ def modify_prosody(
         # Extraer el segmento a modificar
         segment = y[start_sample:end_sample]
 
-        # Aplicar cambios de velocidad
-        if speed_change != 1.0:
-            try:
-                segment = phase_vocoder(segment, sr, speed=speed_change)
-                logger.info(f"Modificación {idx+1}: Cambiado velocidad a {speed_change}x")
-            except Exception as e:
-                logger.error(f"Error al aplicar cambio de velocidad en modificación {idx+1}: {e}")
-                raise RuntimeError(f"Error al aplicar cambio de velocidad en modificación {idx+1}: {e}")
+        # Interpretar speed_change=0 como una solicitud para silenciar el segmento
+        if speed_change == 0.0:
+            logger.info(f"Modificación {idx+1}: speed_change=0.0 interpretado como solicitud de silencio.")
+            # Silenciar el segmento
+            volume_change_db = -100.0  # Asegurar que el volumen sea prácticamente nulo
+            speed_change = 1.0  # Resetear velocidad a normal
 
-        # Aplicar cambios de pitch
-        if pitch_shift_steps != 0.0:
+        # Aplicar cambios de velocidad y pitch usando librosa
+        if speed_change != 1.0 or pitch_shift_steps != 0.0:
             try:
-                segment = pitch_shift(segment, sr, n_steps=pitch_shift_steps)
-                logger.info(f"Modificación {idx+1}: Cambiado pitch a {pitch_shift_steps} semitonos")
+                segment = change_speed_pitch(segment, sr, speed=speed_change, pitch=pitch_shift_steps)
+                logger.info(f"Modificación {idx+1}: Cambiado velocidad a {speed_change}x y pitch a {pitch_shift_steps} semitonos")
             except Exception as e:
-                logger.error(f"Error al aplicar cambio de pitch en modificación {idx+1}: {e}")
-                raise RuntimeError(f"Error al aplicar cambio de pitch en modificación {idx+1}: {e}")
+                logger.error(f"Error al aplicar cambio de velocidad y pitch en modificación {idx+1}: {e}")
+                raise RuntimeError(f"Error al aplicar cambio de velocidad y pitch en modificación {idx+1}: {e}")
 
         # Aplicar cambios de volumen
         if volume_change_db != 0.0:
             try:
                 volume_change_factor = 10 ** (volume_change_db / 20)
                 segment = segment * volume_change_factor
+                # Asegurarse de que los valores no excedan [-1.0, 1.0]
+                segment = np.clip(segment, -1.0, 1.0)
                 logger.info(f"Modificación {idx+1}: Cambiado volumen a {volume_change_db} dB")
             except Exception as e:
                 logger.error(f"Error al aplicar cambio de volumen en modificación {idx+1}: {e}")
@@ -370,6 +324,7 @@ def modify_prosody(
         try:
             unmodified_segment = y[int(last_end_sec * sr) : ]
             segments.append(unmodified_segment)
+            logger.info(f"Agregado segmento final sin modificar: {last_end_sec}s a {total_duration_sec}s")
         except Exception as e:
             logger.error(f"Error al agregar segmento final sin modificar: {e}")
             raise RuntimeError(f"Error al agregar segmento final sin modificar: {e}")
@@ -383,14 +338,15 @@ def modify_prosody(
         final_audio = segments[0]
         for seg in segments[1:]:
             final_audio = crossfade_segments(final_audio, seg, sr, crossfade_duration=cross_fade_duration)
+        logger.info("Segmentos concatenados con crossfade")
     except Exception as e:
         logger.error(f"Error al concatenar segmentos con crossfade: {e}")
         raise RuntimeError(f"Error al concatenar segmentos con crossfade: {e}")
 
-    # Aplicar cambio de velocidad global usando phase vocoder
+    # Aplicar cambio de velocidad global usando librosa
     if global_speed_change != 1.0:
         try:
-            final_audio = phase_vocoder(final_audio, sr, speed=global_speed_change)
+            final_audio = change_speed_pitch(final_audio, sr, speed=global_speed_change, pitch=0.0)
             logger.info(f"Aplicando cambio de velocidad global: {global_speed_change}x")
         except Exception as e:
             logger.error(f"Error al aplicar cambio de velocidad global: {e}")
@@ -430,3 +386,47 @@ def modify_prosody(
         raise RuntimeError(f"Error al guardar el audio modificado: {e}")
 
     return output_path
+
+if __name__ == "__main__":
+    # Definir las modificaciones correctamente
+    modifications = [
+        {
+            'start_time': 0.40,
+            'end_time': 1.78,
+            'pitch_shift': 0.0,
+            'volume_change': 0.0,
+            'speed_change': 1.5
+        },
+        {
+            'start_time': 16.00,
+            'end_time': 18.78,
+            'pitch_shift': 1.0,
+            'volume_change': 2.0,
+            'speed_change': 1.5
+        },
+        {
+            'start_time': 19.00,
+            'end_time': 19.78,          # Ajustado a la duración total
+            'pitch_shift': -0.5,
+            'volume_change': -1.0,
+            'speed_change': 0.8
+        }
+    ]
+
+    try:
+        output_audio_path = modify_prosody(
+            audio_path='ruta/al/audio_original.wav',  # Reemplaza con la ruta real
+            modifications=modifications,
+            remove_silence=True,         # Cambia a False para pruebas iniciales
+            min_silence_len=0.5,
+            silence_thresh=-40,
+            keep_silence=0.25,
+            global_speed_change=1.0,      # sin cambio de velocidad global
+            cross_fade_duration=0.05,
+            fade_duration=0.05,
+            silence_between_mods=0.02
+        )
+        print(f"Audio modificado guardado en: {output_audio_path}")
+    except Exception as e:
+        logger.error(f"Error al modificar la prosodia: {e}")
+        print(f"Error al modificar la prosodia: {e}")

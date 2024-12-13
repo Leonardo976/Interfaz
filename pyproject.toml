@@ -4,8 +4,10 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "f5-tts"
+version = "0.1.0"
+description = "Conversion de voz para educacion"
+authors = ["Leonardo Munoz <leonardo.munoz.f@usach.cl"]
 dynamic = ["version"]
-description = "F5-TTS: A Fairytaler that Fakes Fluent and Faithful Speech with Flow Matching"
 readme = "README.md"
 license = {text = "MIT License"}
 classifiers = [

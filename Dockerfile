@@ -1,24 +1,36 @@
-FROM pytorch/pytorch:2.4.0-cuda12.4-cudnn9-devel
+# Usa una imagen ligera de Python 3.10
+FROM python:3.10.12-slim
 
-USER root
+# Instalar dependencias necesarias para compilar algunas librerías
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    ffmpeg \
+    libsndfile1 \
+    libjpeg-dev \
+    libpng-dev \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
 
-ARG DEBIAN_FRONTEND=noninteractive
+# Establece el directorio de trabajo dentro del contenedor
+WORKDIR /app
 
-LABEL github_repo="https://github.com/SWivid/F5-TTS"
+# Copia los archivos de dependencias al contenedor
+COPY pyproject.toml ./
 
-RUN set -x \
-    && apt-get update \
-    && apt-get -y install wget curl man git less openssl libssl-dev unzip unar build-essential aria2 tmux vim \
-    && apt-get install -y openssh-server sox libsox-fmt-all libsox-fmt-mp3 libsndfile1-dev ffmpeg \
-    && rm -rf /var/lib/apt/lists/* \
-    && apt-get clean
+# Instalar setuptools, wheel y pip para asegurar compatibilidad
+RUN pip install --no-cache-dir --upgrade pip setuptools wheel
 
-WORKDIR /workspace
+# Instalar Poetry para manejar dependencias de pyproject.toml
+RUN pip install --no-cache-dir poetry
 
-RUN git clone https://github.com/SWivid/F5-TTS.git \
-    && cd F5-TTS \
-    && pip install -e .[eval]
+# Instalar las dependencias definidas en pyproject.toml
+RUN poetry install --no-root --no-dev
 
-ENV SHELL=/bin/bash
+# Copiar todos los archivos de la carpeta actual al contenedor
+COPY . .
 
-WORKDIR /workspace/F5-TTS
+# Exponer el puerto que usará Flask
+EXPOSE 5000
+
+# Comando para ejecutar la aplicación Flask utilizando Gunicorn
+CMD ["gunicorn", "--workers", "4", "--bind", "0.0.0.0:5000", "f5_tts.infer.infer_gradio:app"]

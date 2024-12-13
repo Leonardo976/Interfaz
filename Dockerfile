@@ -4,6 +4,7 @@ FROM python:3.10.12-slim
 # Instalar dependencias necesarias para compilar algunas librerías
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
+    curl \
     ffmpeg \
     libsndfile1 \
     libjpeg-dev \
@@ -11,17 +12,16 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
+# Instalar poetry (no es necesario instalar pip de nuevo)
+RUN curl -sSL https://install.python-poetry.org | python3 - 
+# Asegura que Poetry esté disponible en el PATH
+ENV PATH="/root/.local/bin:$PATH"
+
 # Establece el directorio de trabajo dentro del contenedor
 WORKDIR /app
 
-# Copia los archivos de dependencias al contenedor
-COPY pyproject.toml ./
-
-# Instalar setuptools, wheel y pip para asegurar compatibilidad
-RUN pip install --no-cache-dir --upgrade pip setuptools wheel
-
-# Instalar Poetry para manejar dependencias de pyproject.toml
-RUN pip install --no-cache-dir poetry
+# Copia solo pyproject.toml (sin poetry.lock)
+COPY pyproject.toml ./ 
 
 # Instalar las dependencias definidas en pyproject.toml
 RUN poetry install --no-root --no-dev

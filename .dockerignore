@@ -1,98 +1,33 @@
-# Ignorar entornos virtuales y dependencias locales
-.env
-.venv/
-env/
-ENV/
-
-# Ignorar archivos de Python innecesarios
+# Archivos de Python compilados
 __pycache__/
 *.pyc
 *.pyo
 *.pyd
 
-# Archivos de caché de pip y pipenv
-pip-log.txt
-pip-delete-this-directory.txt
-
-# Archivos de registros y de salida
-*.log
-*.out
-logs/
-
-# Archivos de sistema (macOS, Windows, Linux)
-.DS_Store
-Thumbs.db
-ehthumbs.db
-Icon?
-*.swp
-*.swo
-*.bak
-*.tmp
-
 # Archivos de control de versiones
 .git/
 .gitignore
-.gitattributes
 
-# Archivos de configuración de IDEs
-.vscode/
-.idea/
-*.iml
+# Archivos de Docker
+Dockerfile
+docker-compose.yml
 
-# Archivos de compilación de Python
-*.egg
+# Archivos de instalación de pip
+*.whl
 *.egg-info/
 dist/
 build/
 
-# Archivos de Docker
-.dockerignore
-docker-compose.override.yml
+# Archivos de IDEs y editores
+.vscode/
+.idea/
+*.iml
 
-# Archivos de configuración locales
-local.env
-*.env
-
-# Archivos temporales
-*.swp
-*.swo
-*.bak
+# Archivos de logs y temporales
+*.log
+logs/
 *.tmp
+*.swp
 
-# Archivos de caché de Docker
-**/.docker/
-**/.dockerignore
-
-# Archivos de wheel y paquetes de Python
-*.whl
-
-# Excluir los archivos de pruebas y los archivos de resultados
-tests/
-__pycache__/
-.coverage
-.tox
-.nox
-.cache/
-*.coverage
-nosetests.xml
-coverage.xml
-*.cover
-*.py,cover
-.hypothesis/
-
-# Excluir archivos de instalación
-*.sh
-*.bat
-
-# Excluir archivos de instalación de node_modules
+# Archivos de instalación de node_modules
 node_modules/
-
-# Ignorar los archivos de tar y zip
-*.tar
-*.tar.gz
-*.zip
-
-# Archivos de configuración de CI/CD
-.circleci/
-.github/
-.gitlab-ci.yml

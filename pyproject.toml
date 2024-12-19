@@ -17,6 +17,7 @@ classifiers = [
 
 [tool.poetry.dependencies]
 python = "^3.10"
+gunicorn = "^20.1.0"
 accelerate = ">=0.33.0"
 bitsandbytes = ">0.37.0"
 cached_path = "*"
@@ -47,7 +48,8 @@ flask = "*"
 flask_cors = "*"
 apscheduler = "*"
 torchvision = "*"
-faster_whisper = "0.10.1"  # Aquí se especifica la versión exacta que quieres usar
+faster_whisper = "0.10.1"
+whisper_timestamped = "*"
 
 [tool.poetry.extras]
 eval = ["faster_whisper", "funasr", "jiwer", "modelscope", "zhconv", "zhon"]
@@ -60,3 +62,5 @@ Homepage = "https://github.com/SWivid/F5-TTS"
 "f5-tts_infer-gradio" = "f5_tts.infer.infer_gradio:main"
 "f5-tts_finetune-cli" = "f5_tts.train.finetune_cli:main"
 "f5-tts_finetune-gradio" = "f5_tts.train.finetune_gradio:main"
+
+

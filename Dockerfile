@@ -9,25 +9,44 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libsndfile1 \
     libjpeg-dev \
     libpng-dev \
+    libavformat-dev \
+    libavcodec-dev \
+    libavdevice-dev \
+    libavfilter-dev \
+    libavutil-dev \
+    libswscale-dev \
+    libswresample-dev \
+    pkg-config \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
-# Instalar poetry (no es necesario instalar pip de nuevo)
-RUN curl -sSL https://install.python-poetry.org | python3 - 
-# Asegura que Poetry esté disponible en el PATH
+# Instalar Poetry
+RUN curl -sSL https://install.python-poetry.org | python3 -
 ENV PATH="/root/.local/bin:$PATH"
 
 # Establece el directorio de trabajo dentro del contenedor
 WORKDIR /app
 
-# Copia solo pyproject.toml (sin poetry.lock)
-COPY pyproject.toml ./ 
+# Copiar los archivos de dependencias al contenedor
+COPY pyproject.toml poetry.lock ./
 
-# Instalar las dependencias definidas en pyproject.toml
-RUN poetry install --no-root --no-dev
+# Configurar Poetry para no usar virtualenvs
+RUN poetry config virtualenvs.create false
 
-# Copiar todos los archivos de la carpeta actual al contenedor
-COPY . .
+# Instalar av primero para usar precompilados si están disponibles
+RUN pip install av --no-cache-dir
+
+# Instalar las dependencias definidas en pyproject.toml (solo las main, sin dev)
+RUN poetry install --no-root --only main --no-interaction --no-ansi
+
+# Instalar PyTorch con soporte CUDA (cu121)
+RUN pip install torch torchvision torchaudio --extra-index-url https://download.pytorch.org/whl/cu121
+
+# Copiar la carpeta src al contenedor, incluyendo todas sus subcarpetas como model
+COPY src /app/src
+
+# Agregar la carpeta src al PYTHONPATH
+ENV PYTHONPATH="/app/src"
 
 # Exponer el puerto que usará Flask
 EXPOSE 5000

@@ -91,6 +91,11 @@ function MultiSpeechGenerator() {
     setGenerationText(prev => `${prev}{${name}} `);
   };
 
+  // Nueva función para insertar silencios
+  const handleInsertSilence = (duration) => {
+    setGenerationText(prev => `${prev}<silencio ${duration}> `);
+  };
+
   const handleGenerate = async () => {
     try {
       setIsGenerating(true);
@@ -177,7 +182,8 @@ function MultiSpeechGenerator() {
 
   /**
    * Función para parsear las modificaciones desde el texto editable.
-   * Si hay una marca antes de la primera marca de tiempo, se aplica al audio completo.
+   * Ahora maneja tanto marcas de prosodia como de silencio.
+   * Se ha modificado para incluir 'start_time' en las modificaciones de tipo 'silence'.
    */
   const parseModificationsFromText = (text) => {
     // Regex para encontrar marcas de tiempo
@@ -188,13 +194,19 @@ function MultiSpeechGenerator() {
       matches.push({time: parseFloat(match[1]), index: match.index});
     }
 
-    const hasMarks = (segment_text) => {
+    const hasProsodyMarks = (segment_text) => {
       // Patrón insensible a mayúsculas/minúsculas para detectar marcas de prosodia
       const tagPattern = /<(pitch|volume|velocity)\s+([\d\.]+)>/i;
       return tagPattern.test(segment_text);
     };
 
-    const extractMarks = (segment_text) => {
+    const hasSilenceMarks = (segment_text) => {
+      // Patrón insensible a mayúsculas/minúsculas para detectar marcas de silencio
+      const silencePattern = /<silencio\s+([\d\.]+)>/i;
+      return silencePattern.test(segment_text);
+    };
+
+    const extractProsodyMarks = (segment_text) => {
       const result = {pitch_shift:0, volume_change:0, speed_change:1.0};
       const tagPatternAll = /<(pitch|volume|velocity)\s+([\d\.]+)>/gi;
       let tagM;
@@ -208,6 +220,15 @@ function MultiSpeechGenerator() {
       return result;
     };
 
+    const extractSilenceMarks = (segment_text) => {
+      const silencePattern = /<silencio\s+([\d\.]+)>/i;
+      const match = silencePattern.exec(segment_text);
+      if (match) {
+        return parseFloat(match[1]);
+      }
+      return null;
+    };
+
     let modifications = [];
     let accumulatedStart = 0.0;
 
@@ -216,18 +237,33 @@ function MultiSpeechGenerator() {
     const textBeforeFirstTime = (matches.length > 0) ? text.substring(0, matches[0].index) : text;
 
     // Extraer marcas antes de la primera marca de tiempo
-    let initialMarks = {pitch_shift:0, volume_change:0, speed_change:1.0};
-    if (hasMarks(textBeforeFirstTime)) {
-      initialMarks = extractMarks(textBeforeFirstTime);
-      // Aplicar la modificación desde 0.0 hasta el final del audio
+    let initialProsodyMarks = {pitch_shift:0, volume_change:0, speed_change:1.0};
+    let initialSilenceDuration = null;
+    if (hasProsodyMarks(textBeforeFirstTime)) {
+      initialProsodyMarks = extractProsodyMarks(textBeforeFirstTime);
+      // Aplicar la modificación desde 0.0 hasta el primer tiempo encontrado o el final
+      const firstTimeFound = (matches.length > 0) ? matches[0].time : 9999.0;
       modifications.push({
+        type: 'prosody',
         start_time: 0.0,
-        end_time: 9999.0, // Valor grande para indicar hasta el final; el backend lo ajustará
-        pitch_shift: initialMarks.pitch_shift,
-        volume_change: initialMarks.volume_change,
-        speed_change: initialMarks.speed_change
+        end_time: firstTimeFound,
+        pitch_shift: initialProsodyMarks.pitch_shift,
+        volume_change: initialProsodyMarks.volume_change,
+        speed_change: initialProsodyMarks.speed_change
       });
-      accumulatedStart = 9999.0; // No habrá acumulación después
+      accumulatedStart = firstTimeFound;
+    }
+
+    if (hasSilenceMarks(textBeforeFirstTime)) {
+      initialSilenceDuration = extractSilenceMarks(textBeforeFirstTime);
+      if (initialSilenceDuration) {
+        modifications.push({
+          type: 'silence',
+          start_time: accumulatedStart,
+          duration: initialSilenceDuration
+        });
+        accumulatedStart += initialSilenceDuration;
+      }
     }
 
     // Iterar sobre las marcas de tiempo
@@ -237,13 +273,13 @@ function MultiSpeechGenerator() {
       const end_index = (i < matches.length - 1) ? matches[i+1].index : text.length;
       const segment_text = text.substring(start_index, end_index);
 
-      if (hasMarks(segment_text)) {
+      if (hasProsodyMarks(segment_text)) {
         // Extraer las marcas de esta palabra
-        const m = extractMarks(segment_text);
-
+        const m = extractProsodyMarks(segment_text);
         // Agregar un segmento sin modificar antes de esta palabra si hay espacio
         if (start_time > accumulatedStart && accumulatedStart < 9999.0) {
           modifications.push({
+            type: 'prosody',
             start_time: accumulatedStart,
             end_time: start_time,
             pitch_shift:0,
@@ -252,9 +288,10 @@ function MultiSpeechGenerator() {
           });
         }
 
-        // Agregar el segmento con modificación
+        // Agregar el segmento con modificación de prosodia
         const end_time = (i < matches.length - 1) ? matches[i+1].time : 9999.0; // Hasta el final si es el último
         modifications.push({
+          type: 'prosody',
           start_time,
           end_time,
           pitch_shift: m.pitch_shift,
@@ -265,19 +302,45 @@ function MultiSpeechGenerator() {
         // Actualizar el inicio acumulado
         accumulatedStart = end_time;
       }
+
+      if (hasSilenceMarks(segment_text)) {
+        const silenceDuration = extractSilenceMarks(segment_text);
+        if (silenceDuration) {
+          modifications.push({
+            type: 'silence',
+            start_time: accumulatedStart,
+            duration: silenceDuration
+          });
+          accumulatedStart += silenceDuration;
+        }
+      }
       // Si no hay marcas, no hacemos nada (se acumulará en el siguiente segmento)
     }
 
-    // Si no hay marcas de tiempo pero hay marcas de prosodia, asegurar modificación completa
-    if (matches.length === 0 && hasMarks(text)) {
-      const m = extractMarks(text);
-      modifications = [{
-        start_time: 0.0,
-        end_time: 9999.0, // Valor grande para indicar hasta el final; el backend lo ajustará
-        pitch_shift: m.pitch_shift,
-        volume_change: m.volume_change,
-        speed_change: m.speed_change
-      }];
+    // Si no hay marcas de tiempo pero hay marcas de prosodia o silencio, asegurar modificación completa
+    if (matches.length === 0) {
+      if (hasProsodyMarks(text)) {
+        const m = extractProsodyMarks(text);
+        modifications.push({
+          type: 'prosody',
+          start_time: 0.0,
+          end_time: 9999.0,
+          pitch_shift: m.pitch_shift,
+          volume_change: m.volume_change,
+          speed_change: m.speed_change
+        });
+      }
+
+      if (hasSilenceMarks(text)) {
+        const silenceDuration = extractSilenceMarks(text);
+        if (silenceDuration) {
+          modifications.push({
+            type: 'silence',
+            start_time: 0.0,
+            duration: silenceDuration
+          });
+        }
+      }
     }
 
     return modifications;
@@ -309,12 +372,12 @@ function MultiSpeechGenerator() {
         audio_path: generatedAudio,
         modifications
       });
-      if (response.data.output_audio_path) {
+      if (response.data.success) {
         setModifiedAudio(response.data.output_audio_path);
         setGeneratedAudios(prev => [...prev, response.data.output_audio_path]); // Añadir a la lista de audios generados
-        toast.success('Prosodia generada con éxito');
+        toast.success(response.data.message || 'Prosodia generada con éxito');
       } else {
-        toast.error('Error al generar prosodia');
+        toast.error(response.data.message || 'Error al generar prosodia');
       }
     } catch (error) {
       toast.error('Error al generar prosodia');
@@ -368,12 +431,27 @@ function MultiSpeechGenerator() {
         <div className="mb-6">
           <h3 className="text-lg font-semibold mb-2">Consejos:</h3>
           <pre className="whitespace-pre-wrap text-sm bg-gray-50 p-4 rounded">
-{`- Usa <velocity 1.5>, <pitch 2>, o <volume 1.5> en las palabras que quieras modificar.
+{`- Usa <velocity 1.5>, <pitch 2>, <volume 1.5>, <silencio 2> o <silencio 1.5> en las palabras que quieras modificar.
 - Si colocas una marca antes de la primera (tiempo), se aplicará al audio completo.
 - Las palabras sin marcas se acumulan en un solo segmento sin cortes.
 - Las palabras con marca forman su propio segmento con crossfade corto.
-- Escribe las marcas sin importar mayúsculas: <Velocity 1.5> o <velocity 1.5> funcionarán igual.`}
+- Escribe las marcas sin importar mayúsculas: <Velocity 1.5>, <velocity 1.5>, <Silencio 2> o <silencio 1.5> funcionarán igual.`}
           </pre>
+          <div className="mt-4 flex space-x-2">
+            <button
+              onClick={() => handleInsertSilence(2.0)}
+              className="px-3 py-1 bg-gray-300 text-gray-800 rounded hover:bg-gray-400 transition"
+            >
+              Insertar Silencio 2s
+            </button>
+            <button
+              onClick={() => handleInsertSilence(1.5)}
+              className="px-3 py-1 bg-gray-300 text-gray-800 rounded hover:bg-gray-400 transition"
+            >
+              Insertar Silencio 1.5s
+            </button>
+            {/* Puedes añadir más botones para diferentes duraciones si lo deseas */}
+          </div>
         </div>
 
         <div className="space-y-6">
@@ -410,7 +488,7 @@ function MultiSpeechGenerator() {
             value={generationText}
             onChange={(e) => setGenerationText(e.target.value)}
             className="w-full h-40 p-3 border rounded-md"
-            placeholder="Ingresa el guion con los tipos de habla entre llaves..."
+            placeholder="Ingresa el guion con los tipos de habla entre llaves y silencios entre <>..."
           />
         </div>
 
@@ -530,7 +608,7 @@ function MultiSpeechGenerator() {
               onChange={(e) => setEditableTranscription(e.target.value)}
             />
             <p className="text-xs text-gray-500 mt-1">
-              - Coloca marcas &lt;pitch X&gt;, &lt;volume X&gt;, &lt;velocity X&gt; solo en las palabras que quieras modificar.<br/>
+              - Coloca marcas &lt;pitch X&gt;, &lt;volume X&gt;, &lt;velocity X&gt;, &lt;silencio X&gt; solo en las palabras que quieras modificar.<br/>
               - Si colocas una marca antes de la primera (tiempo), se aplicará al audio completo.<br/>
               - Las palabras sin marcas se acumulan en un solo segmento sin cortes.<br/>
               - Las palabras con marca forman su propio segmento con crossfade corto.

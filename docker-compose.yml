@@ -1,0 +1,38 @@
+# docker-compose.yml
+
+version: '3.8'
+
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: f5-tts-image
+    container_name: f5-tts-backend
+    ports:
+      - "5000:5000"
+    environment:
+      - PYTHONPATH=/app/src
+    networks:
+      - f5-tts-network
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: ./Front
+      dockerfile: Dockerfile
+    image: f5-tts-frontend
+    container_name: f5-tts-frontend
+    ports:
+      - "3000:80"
+    environment:
+      - REACT_APP_BACKEND_URL=http://backend:5000
+    depends_on:
+      - backend
+    networks:
+      - f5-tts-network
+    restart: unless-stopped
+
+networks:
+  f5-tts-network:
+    driver: bridge

@@ -17,7 +17,8 @@ from pydub import AudioSegment
 import librosa
 import whisper_timestamped
 import datetime
-from prosody import modify_prosody
+from f5_tts.infer.prosody import modify_prosody
+
 from f5_tts.model import DiT, UNetT
 from f5_tts.infer.utils_infer import (
     load_vocoder,
@@ -31,7 +32,6 @@ from apscheduler.schedulers.background import BackgroundScheduler
 import atexit
 from huggingface_hub import hf_hub_download
 import uuid  # <--- Importación añadida
-import pyrubberband as pyrb  # <--- Importación añadida
 
 import torchvision
 torchvision.disable_beta_transforms_warning()

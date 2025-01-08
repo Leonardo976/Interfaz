@@ -1,7 +1,9 @@
 # Usa una imagen ligera de Python 3.10
 FROM python:3.10.12-slim
 
-# Instalar dependencias necesarias para compilar algunas librerías
+# -------------------------
+# 1. Instalar dependencias del sistema
+# -------------------------
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     curl \
@@ -20,36 +22,59 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
-# Instalar Poetry
+# -------------------------
+# 2. Instalar Poetry
+# -------------------------
 RUN curl -sSL https://install.python-poetry.org | python3 -
 ENV PATH="/root/.local/bin:$PATH"
 
-# Establece el directorio de trabajo dentro del contenedor
 WORKDIR /app
 
-# Copiar los archivos de dependencias al contenedor
+# -------------------------
+# 3. Copiar archivos de dependencias
+# -------------------------
 COPY pyproject.toml poetry.lock ./
 
-# Configurar Poetry para no usar virtualenvs
+# -------------------------
+# 4. Configurar Poetry para NO crear venvs
+# -------------------------
 RUN poetry config virtualenvs.create false
 
-# Instalar av primero para usar precompilados si están disponibles
+# -------------------------
+# 5. Instalar av antes de instalar el resto
+# -------------------------
 RUN pip install av --no-cache-dir
 
-# Instalar las dependencias definidas en pyproject.toml (solo las main, sin dev)
+# -------------------------
+# 6. Instalar dependencias definidas en pyproject.toml 
+#    (excluyendo las dev si tienes configurado "main" en Poetry)
+# -------------------------
 RUN poetry install --no-root --only main --no-interaction --no-ansi
 
-# Instalar PyTorch con soporte CUDA (cu121)
-RUN pip install torch torchvision torchaudio --extra-index-url https://download.pytorch.org/whl/cu121
+# -------------------------
+# 7. Instalar PyTorch con soporte CUDA (cu121)
+# -------------------------
+RUN pip install --no-cache-dir torch torchvision torchaudio --extra-index-url https://download.pytorch.org/whl/cu121
 
-# Copiar la carpeta src al contenedor, incluyendo todas sus subcarpetas como model
+# -------------------------
+# 8. Copiar la carpeta src a /app/src (con todos sus subdirectorios)
+# -------------------------
 COPY src /app/src
 
-# Agregar la carpeta src al PYTHONPATH
+# -------------------------
+# 9. Agregar la carpeta src al PYTHONPATH
+# -------------------------
 ENV PYTHONPATH="/app/src"
 
-# Exponer el puerto que usará Flask
+# -------------------------
+# 10. Exponer el puerto que usará Flask
+# -------------------------
 EXPOSE 5000
 
-# Comando para ejecutar la aplicación Flask utilizando Gunicorn
-CMD ["gunicorn", "--workers", "4", "--bind", "0.0.0.0:5000", "f5_tts.infer.infer_gradio:app"]
+# -------------------------
+# 11. Ajustar Gunicorn con un timeout mayor
+#     para que los modelos de TTS no causen Worker Timeout
+# -------------------------
+
+CMD ["gunicorn", "--workers", "2", "--bind", "0.0.0.0:5000", "--timeout", "600", "f5_tts.infer.infer_gradio:app"]
+

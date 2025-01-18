@@ -439,7 +439,7 @@ def modify_prosody_route():
         modified_audio_filename = f"modified_{uuid.uuid4().hex}.wav"
         modified_audio_path = os.path.join(app.config['GENERATED_AUDIO_FOLDER'], modified_audio_filename)
 
-        # Llamar a la función de modificación de prosodia
+        # Intentar modificar la prosodia con los parámetros originales
         modify_prosody(
             audio_path=audio_path,
             modifications=modifications,
@@ -447,9 +447,26 @@ def modify_prosody_route():
         )
         
         return jsonify({'success': True, 'output_audio_path': modified_audio_path}), 200
+
+    except ValueError as ve:
+        # Capturar error de crossfade y reintentar sin crossfade
+        logger.warning(f"Crossfade issue encountered: {ve}, trying without crossfade restrictions.")
+        try:
+            modify_prosody(
+                audio_path=audio_path,
+                modifications=modifications,
+                output_path=modified_audio_path,
+                cross_fade_duration=0  # Desactivar crossfade
+            )
+            return jsonify({'success': True, 'output_audio_path': modified_audio_path}), 200
+        except Exception as e2:
+            logger.exception(f'Error al modificar la prosodia sin crossfade: {e2}')
+            return jsonify({'success': False, 'message': f'Error al modificar la prosodia: {e2}'}), 500
+
     except Exception as e:
         logger.exception(f'Error al modificar la prosodia: {e}')
         return jsonify({'success': False, 'message': f'Error al modificar la prosodia: {e}'}), 500
+
 
 @app.route('/api/delete_audio', methods=['POST'])
 def delete_audio():

@@ -5,6 +5,8 @@ import axios from 'axios';
 import toast from 'react-hot-toast';
 import SpeechTypeInput from './SpeechTypeInput';
 import AudioPlayer from './AudioPlayer';
+import ProsodyModifier from './ProsodyModifier';
+
 
 const MAX_SPEECH_TYPES = 100;
 
@@ -520,31 +522,9 @@ function MultiSpeechGenerator() {
           </div>
         )}
 
-        {transcriptionData && transcriptionData.success && (
-          <div className="mt-6">
-            <h3 className="text-lg font-medium mb-2">Transcripción Generada (Editable):</h3>
-            <textarea
-              className="w-full h-64 p-3 border rounded-md whitespace-pre-wrap font-mono text-sm"
-              value={editableTranscription}
-              onChange={(e) => setEditableTranscription(e.target.value)}
-            />
-            <p className="text-xs text-gray-500 mt-1">
-              - Coloca marcas &lt;pitch X&gt;, &lt;volume X&gt;, &lt;velocity X&gt; solo en las palabras que quieras modificar.<br/>
-              - Si colocas una marca antes de la primera (tiempo), se aplicará al audio completo.<br/>
-              - Las palabras sin marcas se acumulan en un solo segmento sin cortes.<br/>
-              - Las palabras con marca forman su propio segmento con crossfade corto.
-            </p>
-            <button
-              onClick={handleGenerarProsodia}
-              disabled={isProsodyGenerating}
-              className={`mt-4 px-4 py-2 rounded text-white transition ${
-                isProsodyGenerating ? 'bg-green-400 cursor-not-allowed' : 'bg-green-600 hover:bg-green-700'
-              }`}
-            >
-              {isProsodyGenerating ? 'Generando Prosodia...' : 'Generar Prosodia'}
-            </button>
-          </div>
-        )}
+{transcriptionData && transcriptionData.success && (
+  <ProsodyModifier transcriptionData={transcriptionData} generatedAudio={generatedAudio} />
+)}
 
         {modifiedAudio && (
           <div className="mt-6">

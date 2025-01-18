@@ -1,5 +1,5 @@
 // src/components/SpeechTypeInput.jsx
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 
 function SpeechTypeInput({
   id,
@@ -16,6 +16,9 @@ function SpeechTypeInput({
   const [audioFile, setAudioFile] = useState(null);
   const [isUploading, setIsUploading] = useState(false);
   const [hasUploadedAudio, setHasUploadedAudio] = useState(!!uploadedAudio);
+  const [isRecording, setIsRecording] = useState(false);
+  const mediaRecorderRef = useRef(null);
+  const audioChunksRef = useRef([]);
 
   useEffect(() => {
     setRefText(uploadedRefText || '');
@@ -35,6 +38,36 @@ function SpeechTypeInput({
     }
   };
 
+  const startRecording = async () => {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      mediaRecorderRef.current = new MediaRecorder(stream);
+      audioChunksRef.current = [];
+      mediaRecorderRef.current.ondataavailable = (event) => {
+        if (event.data.size > 0) {
+          audioChunksRef.current.push(event.data);
+        }
+      };
+      mediaRecorderRef.current.onstop = () => {
+        const audioBlob = new Blob(audioChunksRef.current, { type: 'audio/wav' });
+        setAudioFile(new File([audioBlob], 'recorded_audio.wav', { type: 'audio/wav' }));
+        setHasUploadedAudio(false);
+      };
+      mediaRecorderRef.current.start();
+      setIsRecording(true);
+    } catch (error) {
+      console.error('Error al acceder al micrófono:', error);
+      alert('No se pudo acceder al micrófono. Por favor, verifica los permisos.');
+    }
+  };
+
+  const stopRecording = () => {
+    if (mediaRecorderRef.current && isRecording) {
+      mediaRecorderRef.current.stop();
+      setIsRecording(false);
+    }
+  };
+
   const handleSubmit = async () => {
     if (!name.trim()) {
       alert('Por favor, ingrese un nombre para el tipo de habla.');
@@ -42,7 +75,7 @@ function SpeechTypeInput({
     }
 
     if (!audioFile && !hasUploadedAudio) {
-      alert('Por favor, seleccione un archivo de audio.');
+      alert('Por favor, seleccione un archivo de audio o grabe uno.');
       return;
     }
 
@@ -122,6 +155,23 @@ function SpeechTypeInput({
                 `Archivo seleccionado: ${audioFile.name}`}
             </p>
           )}
+          <div className="mt-2 flex space-x-2">
+            {!isRecording ? (
+              <button
+                onClick={startRecording}
+                className="px-3 py-1 bg-green-600 text-white rounded hover:bg-green-700 transition"
+              >
+                Grabar Audio
+              </button>
+            ) : (
+              <button
+                onClick={stopRecording}
+                className="px-3 py-1 bg-red-600 text-white rounded hover:bg-red-700 transition"
+              >
+                Detener Grabación
+              </button>
+            )}
+          </div>
         </div>
 
         <div>
@@ -167,7 +217,6 @@ function SpeechTypeInput({
       </div>
     </div>
   );
-
 }
 
 export default SpeechTypeInput;

@@ -237,6 +237,8 @@ def parse_speechtypes_text(gen_text):
             current_style = tokens[i].strip()
     return segments
 
+
+
 @app.route('/api/upload_audio', methods=['POST'])
 def upload_audio():
     try:

@@ -14,7 +14,6 @@ import numpy as np
 import soundfile as sf
 import torchaudio
 from pydub import AudioSegment
-import librosa
 import whisper_timestamped
 import datetime
 from f5_tts.infer.prosody import modify_prosody
@@ -323,10 +322,10 @@ def generate_multistyle_speech():
         if not gen_text:
             logger.error('gen_text es requerido')
             return jsonify({'error': 'gen_text es requerido'}), 400
-    
+
         segments = parse_speechtypes_text(gen_text)
         logger.info(f"Segmentos obtenidos: {segments}")
-        
+
         if "Regular" not in speech_types_dict:
             return jsonify({'error': 'No existe tipo de habla Regular configurado.'}), 400
 
@@ -335,7 +334,7 @@ def generate_multistyle_speech():
             if style not in speech_types_dict:
                 logger.error(f'Tipo de habla no encontrado: {style}')
                 return jsonify({'error': f'Tipo de habla no encontrado: {style}'}), 400
-            
+
             ref_audio = speech_types_dict[style]['audio']
             if not os.path.exists(ref_audio):
                 logger.error(f'Archivo de audio no encontrado para {style}: {ref_audio}')
@@ -347,7 +346,7 @@ def generate_multistyle_speech():
         for segment in segments:
             style = segment["style"]
             text = segment["text"]
-            
+
             speech_type_data = speech_types_dict[style]
             ref_audio = speech_type_data['audio']
             ref_text_original = speech_type_data.get('ref_text', '')
@@ -362,22 +361,22 @@ def generate_multistyle_speech():
                 cross_fade_duration=cross_fade_duration,
                 speed=speed
             )
-            
+
             if sample_rate is None:
                 sample_rate = audio[0]
-            
+
             generated_audio_segments.append(audio[1])
             logger.info(f"Segmento generado para {style} guardado.")
 
         if generated_audio_segments:
             final_audio_data = np.concatenate(generated_audio_segments)
-            
+
             # Generar una ruta única para el audio generado
             generated_audio_filename = f"multi_style_{uuid.uuid4().hex}.wav"
             generated_audio_path = os.path.join(app.config['GENERATED_AUDIO_FOLDER'], generated_audio_filename)
-            
+
             sf.write(generated_audio_path, final_audio_data, sample_rate)
-            
+
             logger.info(f"Audio final multi-estilo guardado en: {generated_audio_path}")
             return jsonify({
                 'success': True,
@@ -422,14 +421,8 @@ def modify_prosody_route():
     audio_path = data.get('audio_path')
     modifications = data.get('modifications', [])
 
-    # Renombrar pitch_shift a pitch_semitones internamente al pasar las modificaciones
-    new_mods = []
-    for m in modifications:
-        m['pitch_semitones'] = m.pop('pitch_shift', 0)
-        m['pitch_shift'] = m.pop('pitch_semitones', 0)
-        new_mods.append(m)
-
-    modifications = new_mods
+    # Eliminar el bloque de renombrado para conservar "pitch_shift" tal como viene.
+    # Anteriormente se renombraba la clave; ahora se omite esa parte.
 
     if not audio_path or not os.path.exists(audio_path):
         return jsonify({'error': 'audio_path no válido'}), 400
@@ -439,13 +432,13 @@ def modify_prosody_route():
         modified_audio_filename = f"modified_{uuid.uuid4().hex}.wav"
         modified_audio_path = os.path.join(app.config['GENERATED_AUDIO_FOLDER'], modified_audio_filename)
 
-        # Intentar modificar la prosodia con los parámetros originales
+        # Llamar a la función de modificación de prosodia con las claves originales
         modify_prosody(
             audio_path=audio_path,
             modifications=modifications,
             output_path=modified_audio_path
         )
-        
+
         return jsonify({'success': True, 'output_audio_path': modified_audio_path}), 200
 
     except ValueError as ve:
@@ -466,7 +459,6 @@ def modify_prosody_route():
     except Exception as e:
         logger.exception(f'Error al modificar la prosodia: {e}')
         return jsonify({'success': False, 'message': f'Error al modificar la prosodia: {e}'}), 500
-
 
 @app.route('/api/delete_audio', methods=['POST'])
 def delete_audio():

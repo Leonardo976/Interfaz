@@ -1,35 +1,27 @@
 import os
 import numpy as np
 import soundfile as sf
-import librosa
 import tempfile
 import logging
-from pysoundtouch import SoundTouch  # Importamos pysoundtouch para procesar audio
-from pydub import AudioSegment  # Importamos PyDub para parchear la función append
+import subprocess
+from pysoundtouch import SoundTouch  # Para velocidad y volumen
+import librosa  # Importación añadida para pitch_shift
+
 
 # Configuración básica del logger
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Parche para AudioSegment.append para evitar restricciones de crossfade
-original_append = AudioSegment.append
-def safe_append(self, segment, crossfade=0):
-    if crossfade > len(segment):
-        crossfade = len(segment)
-    return original_append(self, segment, crossfade=crossfade)
-AudioSegment.append = safe_append
+logger.info(f"Versión de librosa: {librosa.__version__}")
+
 
 def insert_silence(duration, sr):
-    """
-    Crea un segmento de silencio de una duración específica.
-    """
+    """Crea un segmento de silencio de una duración específica."""
     silence = np.zeros(int(duration * sr))
     return silence
 
 def apply_fade(y, sr, fade_duration=0.05):
-    """
-    Aplica un fade-in y fade-out al inicio y final del audio.
-    """
+    """Aplica un fade-in y fade-out al inicio y final del audio."""
     fade_samples = int(fade_duration * sr)
     if fade_samples > len(y):
         fade_samples = len(y)
@@ -40,9 +32,7 @@ def apply_fade(y, sr, fade_duration=0.05):
     return y
 
 def crossfade_segments(seg1, seg2, sr, crossfade_duration=0.05):
-    """
-    Aplica un crossfade entre dos segmentos de audio.
-    """
+    """Aplica un crossfade entre dos segmentos de audio."""
     crossfade_samples = int(crossfade_duration * sr)
     if crossfade_samples > len(seg1):
         crossfade_samples = len(seg1)
@@ -61,22 +51,18 @@ def crossfade_segments(seg1, seg2, sr, crossfade_duration=0.05):
 
 def process_segment(y, sr, speed_change, pitch_shift, volume_change):
     """
-    Aplica cambios de velocidad, pitch y volumen a un segmento de audio usando pysoundtouch.
+    Aplica cambios de velocidad, tono y volumen a un segmento de audio.
+    Usa pysoundtouch para velocidad y volumen, y librosa para tono.
     """
     # Ajustar volumen
     if volume_change != 0.0:
         factor = 10 ** (volume_change / 20)
         y = y * factor
         y = np.clip(y, -1.0, 1.0)
-    # Configurar pysoundtouch
+    
+    # Configurar pysoundtouch para velocidad
     st = SoundTouch(sr, channels=1)
     st.set_rate(speed_change)
-    # pysoundtouch espera un factor multiplicativo para pitch
-    if pitch_shift != 0.0:
-        factor_pitch = 2 ** (pitch_shift / 12)
-    else:
-        factor_pitch = 1.0
-    st.set_pitch(factor_pitch)
     st.put_samples(y)
     result_samples = []
     while True:
@@ -84,10 +70,24 @@ def process_segment(y, sr, speed_change, pitch_shift, volume_change):
         if len(samples) == 0:
             break
         result_samples.append(samples)
-    if result_samples:
-        return np.concatenate(result_samples)
-    else:
-        return y
+    y_processed = np.concatenate(result_samples) if result_samples else y
+    
+    # Aplicar cambio de tono usando librosa
+    if pitch_shift != 0.0:
+        try:
+            # Convertimos el audio a float32 y creamos un diccionario de kwargs
+            audio_float32 = y_processed.astype(np.float32)
+            kwargs = {'sr': sr, 'n_steps': float(pitch_shift)}
+            
+            # Llamamos a pitch_shift con un solo argumento posicional y el resto como kwargs
+            y_processed = librosa.effects.pitch_shift(audio_float32, **kwargs)
+            
+        except Exception as e:
+            logger.error(f"Error aplicando cambio de tono con librosa: {e}")
+            # Para debugging, vamos a imprimir más información sobre los argumentos
+            logger.error(f"Argumentos usados - audio shape: {y_processed.shape}, dtype: {y_processed.dtype}, sr: {sr}, pitch_shift: {pitch_shift}")
+    
+    return y_processed
 
 def modify_prosody(
     audio_path,
@@ -109,8 +109,12 @@ def modify_prosody(
         return {'success': False, 'message': f"El archivo de audio no existe: {audio_path}"}
 
     try:
-        y, sr = librosa.load(audio_path, sr=None, mono=True)
-        total_duration_sec = librosa.get_duration(y=y, sr=sr)
+        # Cargar audio usando soundfile en lugar de librosa
+        y, sr = sf.read(audio_path)
+        # Convertir a mono si es necesario
+        if len(y.shape) > 1:
+            y = np.mean(y, axis=1)
+        total_duration_sec = len(y) / sr
         logger.info(f"Cargado audio desde {audio_path} con tasa de muestreo {sr} Hz y {total_duration_sec:.2f}s de duración")
     except Exception as e:
         logger.error(f"Error al leer el archivo de audio: {e}")
@@ -128,7 +132,7 @@ def modify_prosody(
                 prev_end = end
             non_silent_audio.append(y[prev_end:])
             y = np.concatenate(non_silent_audio)
-            total_duration_sec = librosa.get_duration(y=y, sr=sr)
+            total_duration_sec = len(y) / sr
             logger.info("Silencios eliminados")
         except Exception as e:
             logger.error(f"Error al eliminar silencios: {e}")
@@ -167,9 +171,11 @@ def modify_prosody(
         elif mod.get('type') == 'prosody':
             start_time = mod.get('start_time')
             end_time = mod.get('end_time')
+            # Usar 'pitch_shift' directamente
             pitch_shift = mod.get('pitch_shift', 0.0)
             volume_change = mod.get('volume_change', 0.0)
             speed_change = mod.get('speed_change', 1.0)
+
             if start_time < 0 or end_time <= start_time:
                 logger.error(f"Modificación {idx+1}: tiempos inválidos (start={start_time}, end={end_time}).")
                 return {'success': False, 'message': f"Modificación {idx+1}: tiempos inválidos."}
@@ -215,20 +221,11 @@ def modify_prosody(
         return {'success': False, 'message': "No se generaron segmentos de audio."}
 
     try:
-        final_audio = segments[0]
-        for seg in segments[1:]:
-            try:
-                final_audio = crossfade_segments(final_audio, seg, sr, crossfade_duration=cross_fade_duration)
-            except ValueError as ve:
-                crossfade_samples = int(cross_fade_duration * sr)
-                adjusted_samples = min(len(final_audio), len(seg), crossfade_samples)
-                adjusted_duration = adjusted_samples / sr
-                logger.warning(f"Ajustando crossfade_duration de {cross_fade_duration}s a {adjusted_duration}s debido a segmentos cortos.")
-                final_audio = crossfade_segments(final_audio, seg, sr, crossfade_duration=adjusted_duration)
-        logger.info("Segmentos concatenados con crossfade")
+        final_audio = np.concatenate(segments)
+        logger.info("Segmentos concatenados sin crossfade")
     except Exception as e:
-        logger.error(f"Error al concatenar segmentos con crossfade: {e}")
-        return {'success': False, 'message': f"Error al concatenar segmentos con crossfade: {e}"}
+        logger.error(f"Error al concatenar segmentos: {e}")
+        return {'success': False, 'message': f"Error al concatenar segmentos: {e}"}
 
     if global_speed_change != 1.0 or global_pitch_change != 0.0:
         try:
@@ -269,90 +266,3 @@ def modify_prosody(
         return {'success': False, 'message': f"Error al guardar el audio modificado: {e}"}
 
     return {'success': True, 'output_audio_path': output_path}
-
-def detect_silence(y, sr, min_silence_len=0.5, silence_thresh=-40):
-    """
-    Detecta silencios en el audio.
-    """
-    logger.info("Detectando silencios en el audio")
-    import librosa.effects
-    y_db = librosa.amplitude_to_db(np.abs(y), ref=np.max)
-    silent_frames = y_db < silence_thresh
-    silent_segments = []
-    start = None
-    for i, is_silent in enumerate(silent_frames):
-        if is_silent and start is None:
-            start = i
-        elif not is_silent and start is not None:
-            end = i
-            duration = (end - start) / sr
-            if duration >= min_silence_len:
-                silent_segments.append((start / sr, end / sr))
-            start = None
-    if start is not None:
-        end = len(silent_frames)
-        duration = (end - start) / sr
-        if duration >= min_silence_len:
-            silent_segments.append((start / sr, end / sr))
-    logger.info(f"Silencios detectados: {silent_segments}")
-    return silent_segments
-
-if __name__ == "__main__":
-    modifications = [
-        {
-            'type': 'prosody',
-            'start_time': 0.40,
-            'end_time': 1.78,
-            'pitch_shift': 0.0,
-            'volume_change': 0.0,
-            'speed_change': 1.5
-        },
-        {
-            'type': 'silence',
-            'start_time': 2.00,
-            'duration': 2.0
-        },
-        {
-            'type': 'prosody',
-            'start_time': 16.00,
-            'end_time': 18.78,
-            'pitch_shift': 1.0,
-            'volume_change': 2.0,
-            'speed_change': 1.5
-        },
-        {
-            'type': 'silence',
-            'start_time': 19.00,
-            'duration': 1.5
-        },
-        {
-            'type': 'prosody',
-            'start_time': 19.50,
-            'end_time': 20.28,
-            'pitch_shift': -0.5,
-            'volume_change': -1.0,
-            'speed_change': 0.8
-        }
-    ]
-
-    try:
-        output_audio_path = modify_prosody(
-            audio_path='ruta/al/audio_original.wav',
-            modifications=modifications,
-            remove_silence=True,
-            min_silence_len=0.5,
-            silence_thresh=-40,
-            keep_silence=0.25,
-            global_speed_change=1.0,
-            global_pitch_change=0.0,  # Ajuste de pitch global según se necesite
-            cross_fade_duration=0.05,
-            fade_duration=0.05,
-            silence_between_mods=0.02
-        )
-        if output_audio_path['success']:
-            print(f"Audio modificado guardado en: {output_audio_path['output_audio_path']}")
-        else:
-            print(f"Error: {output_audio_path['message']}")
-    except Exception as e:
-        logger.error(f"Error al modificar la prosodia: {e}")
-        print(f"Error al modificar la prosodia: {e}")

@@ -102,11 +102,15 @@ function SpeechTypeInput({
     <div className="p-4 border rounded-lg bg-gray-50">
       <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
         <div>
-          <label className="block text-sm font-medium text-gray-700 mb-1">
+          <label
+            htmlFor={`name-input-${id}`}
+            className="block text-sm font-medium text-gray-700 mb-1"
+          >
             Nombre del Tipo de Habla {isRegular && <span className="text-blue-600">(Principal)</span>}
           </label>
           <div className="flex space-x-2">
             <input
+              id={`name-input-${id}`}
               type="text"
               value={name}
               onChange={(e) => onNameChange(e.target.value)}
@@ -135,7 +139,10 @@ function SpeechTypeInput({
         </div>
 
         <div>
-          <label className="block text-sm font-medium text-gray-700 mb-1">
+          <label
+            htmlFor={`audio-input-${id}`}
+            className="block text-sm font-medium text-gray-700 mb-1"
+          >
             Audio de Referencia {hasUploadedAudio && <span className="text-green-600">(Cargado)</span>}
           </label>
           <input
@@ -175,10 +182,14 @@ function SpeechTypeInput({
         </div>
 
         <div>
-          <label className="block text-sm font-medium text-gray-700 mb-1">
+          <label
+            htmlFor={`reftext-textarea-${id}`}
+            className="block text-sm font-medium text-gray-700 mb-1"
+          >
             Texto de Referencia (Opcional)
           </label>
           <textarea
+            id={`reftext-textarea-${id}`}
             value={refText}
             onChange={(e) => setRefText(e.target.value)}
             className="w-full p-2 border rounded hover:border-blue-500 focus:border-blue-500 focus:ring-1 focus:ring-blue-500"

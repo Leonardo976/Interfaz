@@ -1,4 +1,3 @@
-// src/components/AudioPlayer.jsx
 import React from 'react';
 
 function AudioPlayer({ audioUrl, filename }) {
@@ -7,7 +6,7 @@ function AudioPlayer({ audioUrl, filename }) {
       {filename && (
         <p className="text-sm text-gray-600 mb-2">Archivo: {filename}</p>
       )}
-      <audio controls className="w-full">
+      <audio controls data-testid="audio-player" className="w-full">
         <source src={audioUrl} type="audio/wav" />
         <source src={audioUrl} type="audio/mpeg" />
         Tu navegador no soporta el elemento de audio.

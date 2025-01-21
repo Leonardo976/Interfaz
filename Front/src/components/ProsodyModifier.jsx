@@ -16,20 +16,19 @@ function ProsodyModifier({ transcriptionData, generatedAudio }) {
       if (Array.isArray(transcriptionData.transcription)) {
         wordArray = transcriptionData.transcription;
       } else {
-        // Suponemos que la transcripción es una cadena con marcadores de tiempo entre paréntesis
+        // Lógica para parsear si transcription es una cadena
         const splitTokens = transcriptionData.transcription.split(' ');
         for (let i = 0; i < splitTokens.length; i++) {
-          // Detectar tokens que representan tiempos, por ejemplo "(0.00)"
+          // Detectar tokens que representan tiempos
           if (/^\(\d+(\.\d+)?\)$/.test(splitTokens[i])) {
             const start_time = parseFloat(splitTokens[i].slice(1, -1));
-            const word = splitTokens[i + 1] || '';  // La palabra debería seguir al tiempo
-            let end_time = start_time + 0.5;  // Valor predeterminado en caso de no encontrar siguiente tiempo
-            // Si el token después de la palabra es otro marcador de tiempo, usarlo como end_time
+            const word = splitTokens[i + 1] || '';
+            let end_time = start_time + 0.5;
             if (i + 2 < splitTokens.length && /^\(\d+(\.\d+)?\)$/.test(splitTokens[i + 2])) {
               end_time = parseFloat(splitTokens[i + 2].slice(1, -1));
             }
             wordArray.push({ word, start_time, end_time });
-            i++;  // Saltar el siguiente token, ya que fue utilizado como palabra
+            i++;
           }
         }
       }
@@ -150,7 +149,7 @@ function ProsodyModifier({ transcriptionData, generatedAudio }) {
       <Toaster position="top-right" />
       <h3 className="text-2xl font-bold mb-4">Transcripción Generada</h3>
       
-      {/* Sección para modificaciones globales */}
+      {/* Modificaciones globales */}
       <div className="mb-4">
         <h4 className="text-xl font-semibold">Modificar audio completo</h4>
         <div className="flex space-x-4">

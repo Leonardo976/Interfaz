@@ -159,7 +159,7 @@ def traducir_numero_a_texto(texto):
     return texto_traducido
 
 def allowed_file(filename):
-    ALLOWED_EXTENSIONS = {'wav', 'mp3', 'ogg', 'm4a', 'WAV', 'MP3', 'OGG', 'M4A'}
+    ALLOWED_EXTENSIONS = {'wav', 'mp3','webm','ogg', 'm4a', 'WAV', 'MP3', 'OGG', 'M4A', 'WEBM'}
     return '.' in filename and filename.rsplit('.', 1)[1].upper() in ALLOWED_EXTENSIONS
 
 @gpu_decorator

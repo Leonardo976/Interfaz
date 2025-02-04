@@ -1,6 +1,6 @@
 // src/components/MultiSpeechGenerator.jsx
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import axios from 'axios';
 import toast from 'react-hot-toast';
 import SpeechTypeInput from './SpeechTypeInput';
@@ -32,8 +32,202 @@ function MultiSpeechGenerator() {
     regular: { audio: null, refText: '' }
   });
 
+  // Cambiar a useRef para los chunks de grabación
+  const recordedChunksRef = useRef([]);
+  const [isRecording, setIsRecording] = useState(null);
+  const [mediaRecorder, setMediaRecorder] = useState(null);
+  const [isPaused, setIsPaused] = useState(false);
+  const [recordTimer, setRecordTimer] = useState(0);
+  const recordTimerRef = useRef(null);
+
   // Estado para manejar la lista de audios generados
   const [generatedAudios, setGeneratedAudios] = useState([]);
+
+// ----------------------------------------------------------------
+// Función para iniciar grabación
+// ----------------------------------------------------------------
+const startRecording = async (speechTypeId) => {
+  try {
+    // Validación de nombre para nuevos tipos de habla
+    if (speechTypeId !== 'regular') {
+      const currentType = speechTypes.find(type => type.id === speechTypeId);
+      if (!currentType?.name?.trim()) {
+        toast.error('Debe ingresar un nombre para el estilo antes de grabar');
+        return;
+      }
+    }
+
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      toast.error('La API de grabación no está soportada en este navegador.');
+      return;
+    }
+
+    const stream = await navigator.mediaDevices.getUserMedia({ 
+      audio: {
+        sampleRate: 44100,
+        channelCount: 1
+      }
+    });
+
+    const options = { 
+      mimeType: 'audio/webm;codecs=opus',
+      audioBitsPerSecond: 128000
+    };
+    
+    const recorder = new MediaRecorder(stream, options);
+    recordedChunksRef.current = [];
+
+    recorder.ondataavailable = (e) => {
+      if (e.data.size > 0) {
+        recordedChunksRef.current.push(e.data);
+      }
+    };
+
+    recorder.onstop = async () => {
+      const blob = new Blob(recordedChunksRef.current, { 
+        type: 'audio/webm;codecs=opus' 
+      });
+      
+      const convertedBlob = await convertWebmToWav(blob);
+      
+      const file = new File([convertedBlob], 'grabacion.wav', {
+        type: 'audio/wav'
+      });
+
+      const refText = audioData[speechTypeId]?.refText || '';
+      await handleAudioUpload(
+        speechTypeId, 
+        file, 
+        refText, 
+        findSpeechTypeNameById(speechTypeId)
+      );
+      
+      recordedChunksRef.current = [];
+      stream.getTracks().forEach(track => track.stop());
+    };
+
+    recorder.start(1000);
+    setMediaRecorder(recorder);
+    setIsRecording(speechTypeId);
+    setIsPaused(false);
+    setRecordTimer(0);
+
+    recordTimerRef.current = setInterval(() => {
+      setRecordTimer((prev) => prev + 1);
+    }, 1000);
+
+    toast('Grabación iniciada');
+  } catch (error) {
+    console.error('Error en grabación:', error);
+    toast.error('No se pudo iniciar la grabación');
+    // Limpiar recursos en caso de error
+    if (mediaRecorder) {
+      mediaRecorder.stream.getTracks().forEach(track => track.stop());
+    }
+  }
+};
+
+// Función para convertir WebM a WAV
+const convertWebmToWav = async (webmBlob) => {
+  const audioContext = new (window.AudioContext || window.webkitAudioContext)();
+  try {
+    const arrayBuffer = await webmBlob.arrayBuffer();
+    const audioBuffer = await audioContext.decodeAudioData(arrayBuffer);
+    const wavBuffer = audioBufferToWav(audioBuffer);
+    return new Blob([wavBuffer], { type: 'audio/wav' });
+  } finally {
+    audioContext.close();
+  }
+};
+
+// Función para convertir AudioBuffer a WAV
+const audioBufferToWav = (buffer) => {
+  const numChannels = buffer.numberOfChannels;
+  const sampleRate = buffer.sampleRate;
+  const format = 3; // Float32
+  const bitDepth = 32;
+
+  const bufferHeader = new ArrayBuffer(44);
+  const view = new DataView(bufferHeader);
+
+  // Encabezado WAV
+  writeString(view, 0, 'RIFF');
+  view.setUint32(4, 36 + buffer.length * numChannels * 4, true);
+  writeString(view, 8, 'WAVE');
+  writeString(view, 12, 'fmt ');
+  view.setUint32(16, 16, true);
+  view.setUint16(20, format, true);
+  view.setUint16(22, numChannels, true);
+  view.setUint32(24, sampleRate, true);
+  view.setUint32(28, sampleRate * numChannels * 4, true);
+  view.setUint16(32, numChannels * (bitDepth / 8), true);
+  view.setUint16(34, bitDepth, true);
+  writeString(view, 36, 'data');
+  view.setUint32(40, buffer.length * numChannels * 4, true);
+
+  // Datos de audio intercalados
+  const interleaved = new Float32Array(buffer.length * numChannels);
+  for (let channel = 0; channel < numChannels; channel++) {
+    const channelData = buffer.getChannelData(channel);
+    for (let i = 0; i < buffer.length; i++) {
+      interleaved[i * numChannels + channel] = channelData[i];
+    }
+  }
+
+  // Combinar header y datos
+  const wavBuffer = new Uint8Array(bufferHeader.byteLength + interleaved.byteLength);
+  wavBuffer.set(new Uint8Array(bufferHeader), 0);
+  wavBuffer.set(new Uint8Array(interleaved.buffer), bufferHeader.byteLength);
+  
+  return wavBuffer;
+};
+
+const writeString = (view, offset, string) => {
+  for (let i = 0; i < string.length; i++) {
+    view.setUint8(offset + i, string.charCodeAt(i));
+  }
+};
+  
+  // --------------------------------------------------------------
+  // Función para pausar y reanudar grabación
+  // --------------------------------------------------------------
+  const pauseRecording = () => {
+    if (!mediaRecorder) return;
+    
+    if (!isPaused) {
+      mediaRecorder.pause();
+      setIsPaused(true);
+      toast('Grabación en pausa');
+    } else {
+      mediaRecorder.resume();
+      setIsPaused(false);
+      toast('Grabación reanudada');
+    }
+  };
+
+  // --------------------------------
+  // Función para detener la grabación
+  // --------------------------------
+  const stopRecording = () => {
+    if (!mediaRecorder) return;
+
+    mediaRecorder.stop();
+    clearInterval(recordTimerRef.current);
+    recordTimerRef.current = null;
+    setRecordTimer(0);
+    setIsRecording(null);
+    setIsPaused(false);
+    setMediaRecorder(null);
+  };
+
+
+  // ------------------------------------------------------
+  // Encuentra el nombre (p.e. "Regular") de un speechType
+  // ------------------------------------------------------
+  const findSpeechTypeNameById = (id) => {
+    const st = speechTypes.find((t) => t.id === id);
+    return st ? st.name : '';
+  };
 
   const handleAddSpeechType = () => {
     if (speechTypes.length < MAX_SPEECH_TYPES) {
@@ -223,12 +417,12 @@ function MultiSpeechGenerator() {
       // Aplicar la modificación desde 0.0 hasta el final del audio
       modifications.push({
         start_time: 0.0,
-        end_time: 9999.0, // Valor grande para indicar hasta el final; el backend lo ajustará
+        end_time: 9999.0,
         pitch_shift: initialMarks.pitch_shift,
         volume_change: initialMarks.volume_change,
         speed_change: initialMarks.speed_change
       });
-      accumulatedStart = 9999.0; // No habrá acumulación después
+      accumulatedStart = 9999.0;
     }
 
     // Iterar sobre las marcas de tiempo
@@ -241,7 +435,7 @@ function MultiSpeechGenerator() {
       if (hasMarks(segment_text)) {
         // Extraer las marcas de esta palabra
         const m = extractMarks(segment_text);
-        // Agregar un segmento sin modificar antes de esta palabra si hay espacio
+        // Agregar un segmento "sin modificar" antes de esta palabra si hay espacio
         if (start_time > accumulatedStart && accumulatedStart < 9999.0) {
           modifications.push({
             start_time: accumulatedStart,
@@ -252,8 +446,8 @@ function MultiSpeechGenerator() {
           });
         }
 
-        // Agregar el segmento con modificación
-        const end_time = (i < matches.length - 1) ? matches[i+1].time : 9999.0; // Hasta el final si es el último
+        // Segmento con modificación
+        const end_time = (i < matches.length - 1) ? matches[i+1].time : 9999.0;
         modifications.push({
           start_time,
           end_time,
@@ -261,19 +455,17 @@ function MultiSpeechGenerator() {
           volume_change: m.volume_change,
           speed_change: m.speed_change
         });
-
-        // Actualizar el inicio acumulado
         accumulatedStart = end_time;
       }
-      // Si no hay marcas, no hacemos nada (se acumulará en el siguiente segmento)
+      // Si no hay marcas en el segmento, no añadimos nada
     }
 
-    // Si no hay marcas de tiempo pero hay marcas de prosodia, asegurar modificación completa
+    // Si no hay marcas de tiempo pero sí de prosodia, aplicar al audio completo
     if (matches.length === 0 && hasMarks(text)) {
       const m = extractMarks(text);
       modifications = [{
         start_time: 0.0,
-        end_time: 9999.0, // Valor grande para indicar hasta el final; el backend lo ajustará
+        end_time: 9999.0,
         pitch_shift: m.pitch_shift,
         volume_change: m.volume_change,
         speed_change: m.speed_change
@@ -311,7 +503,7 @@ function MultiSpeechGenerator() {
       });
       if (response.data.output_audio_path) {
         setModifiedAudio(response.data.output_audio_path);
-        setGeneratedAudios(prev => [...prev, response.data.output_audio_path]); // Añadir a la lista de audios generados
+        setGeneratedAudios(prev => [...prev, response.data.output_audio_path]);
         toast.success('Prosodia generada con éxito');
       } else {
         toast.error('Error al generar prosodia');
@@ -324,7 +516,7 @@ function MultiSpeechGenerator() {
     }
   };
 
-  // Nueva función para eliminar audios generados
+  // Eliminar audios generados
   const handleDeleteAudio = async (audioPath) => {
     const confirmDelete = window.confirm('¿Estás seguro de que deseas eliminar este audio?');
 
@@ -336,14 +528,11 @@ function MultiSpeechGenerator() {
       });
 
       if (response.data.success) {
-        // Actualizar la lista de audios generados eliminando el audio eliminado
         setGeneratedAudios(prev => prev.filter(path => path !== audioPath));
 
-        // Si el audio eliminado es el actualmente seleccionado, limpiar el estado
         if (generatedAudio === audioPath) {
           setGeneratedAudio(null);
         }
-
         if (modifiedAudio === audioPath) {
           setModifiedAudio(null);
         }
@@ -363,13 +552,13 @@ function MultiSpeechGenerator() {
       <div className="bg-white p-8 rounded-2xl shadow-lg border border-gray-100">
         <header className="mb-8">
           <h1 className="text-3xl font-bold text-sky-600 mb-2 flex items-center">
-            {/* Icono: Academic Cap (simula "chalkboard-teacher") */}
+            {/* Icono */}
             <svg xmlns="http://www.w3.org/2000/svg" className="mr-3" width="24" height="24" viewBox="0 0 20 20" fill="currentColor">
               <path d="M10 2L1 7l9 5 9-5-9-5z" />
               <path d="M1 7l9 5 9-5" />
               <path d="M1 13l9 5 9-5" />
             </svg>
-            Generador de Contenido Audio Educativo
+            Generador de contenido de audio educativo
           </h1>
           <p className="text-gray-600">
             Herramienta para crear materiales auditivos con múltiples estilos de habla
@@ -378,7 +567,7 @@ function MultiSpeechGenerator() {
 
         <div className="bg-sky-50 p-6 rounded-xl mb-8">
           <div className="flex items-start">
-            {/* Icono: Lightbulb */}
+            {/* Icono */}
             <svg xmlns="http://www.w3.org/2000/svg" className="mr-3 text-2xl text-sky-600 mt-1" width="24" height="24" viewBox="0 0 352 512" fill="currentColor">
               <path d="M96 0C43 0 0 43 0 96c0 41.7 25.3 77.2 60.3 91.6 3.8 1.8 6.7 5.2 7.4 9.3L80 232c0 13.3 10.7 24 24 24h48v64H88c-13.3 0-24 10.7-24 24v24h128v-24c0-13.3-10.7-24-24-24H112v-64h48c13.3 0 24-10.7 24-24l-12.3-34.1c-.7-4.1 3.6-7.5 7.4-9.3C326.7 173.2 352 137.7 352 96c0-53-43-96-96-96H96z" />
             </svg>
@@ -395,21 +584,149 @@ function MultiSpeechGenerator() {
           </div>
         </div>
 
+        {/* LISTA DE SpeechTypes */}
         <section className="space-y-6 mb-8">
           {speechTypes.map((type) => (
             type.isVisible && (
-              <SpeechTypeInput
-                key={type.id}
-                id={type.id}
-                name={type.name}
-                isRegular={type.id === 'regular'}
-                onNameChange={(name) => handleNameUpdate(type.id, name)}
-                onDelete={() => handleDeleteSpeechType(type.id)}
-                onAudioUpload={(file, refText) => handleAudioUpload(type.id, file, refText, type.name)}
-                onInsert={handleInsertSpeechType}
-                uploadedAudio={audioData[type.id]?.audio}
-                uploadedRefText={audioData[type.id]?.refText}
-              />
+              <div key={type.id} className="p-4 border border-gray-200 rounded-lg bg-gray-50">
+                <div className="flex justify-between items-center">
+                  <div className="flex-1">
+                    <label className="block text-sm font-semibold text-gray-700 mb-1">Nombre del Estilo</label>
+                    <input
+                      type="text"
+                      className="w-full p-2 border border-gray-300 rounded"
+                      value={type.name}
+                      onChange={(e) => handleNameUpdate(type.id, e.target.value)}
+                      disabled={type.id === 'regular'}
+                    />
+                  </div>
+                  {type.id !== 'regular' && (
+                    <button
+                      onClick={() => handleDeleteSpeechType(type.id)}
+                      className="ml-4 px-3 py-2 text-red-500 bg-red-100 hover:bg-red-200 rounded-lg transition-colors"
+                    >
+                      <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 448 512" fill="currentColor">
+                        <path d="M135.2 17.7L144 0h160l8.8 17.7L416 32H32l103.2-14.3zM400 96v368c0 26.5-21.5 48-48 48H96c-26.5 0-48-21.5-48-48V96h352z"/>
+                      </svg>
+                    </button>
+                  )}
+                </div>
+
+                <div className="mt-4">
+                  <label className="block text-sm font-semibold text-gray-700 mb-1">Texto de Referencia</label>
+                  <textarea
+                    className="w-full p-2 border border-gray-300 rounded"
+                    rows="2"
+                    value={audioData[type.id]?.refText || ''}
+                    onChange={(e) =>
+                      setAudioData({
+                        ...audioData,
+                        [type.id]: {
+                          ...audioData[type.id],
+                          refText: e.target.value
+                        }
+                      })
+                    }
+                  />
+                </div>
+
+                <div className="mt-4 flex items-center space-x-3">
+                  <div className="flex flex-col">
+                    <label className="block text-sm font-semibold text-gray-700 mb-1">Archivo de Audio</label>
+                    <input
+                      type="file"
+                      onChange={(e) => {
+                        if (e.target.files && e.target.files.length > 0) {
+                          handleAudioUpload(
+                            type.id,
+                            e.target.files[0],
+                            audioData[type.id]?.refText || '',
+                            type.name
+                          );
+                        }
+                      }}
+                    />
+                  </div>
+
+                  {/* Botón "Grabar voz" en lugar de la bola verde */}
+                  <div className="flex flex-col items-center">
+                    {
+                      (!isRecording || isRecording !== type.id) ? (
+                        <button
+                          onClick={() => startRecording(type.id)}
+                          className={`rounded-full text-white px-4 py-2 flex items-center ${
+                            type.id !== 'regular' && !type.name.trim() ? 
+                              'bg-gray-400 cursor-not-allowed' : 
+                              'bg-green-500 hover:bg-green-600'
+                          }`}
+                          title="Iniciar Grabación"
+                          disabled={type.id !== 'regular' && !type.name.trim()}
+                        >
+                          <svg xmlns="http://www.w3.org/2000/svg" className="mr-2" width="16" height="16" viewBox="0 0 512 512" fill="currentColor">
+                            <path d="M192 352v-96c0-53 43-96 96-96s96 43 96 96v96c0 53-43 96-96 96s-96-43-96-96zM416 208c0-77.4-62.6-140-140-140s-140 62.6-140 140v96c0 77.4 62.6 140 140 140s140-62.6 140-140v-96z"/>
+                          </svg>
+                          Grabar voz
+                        </button>
+                      ) : (
+                        <div className="flex space-x-2">
+                          {/* Botón Pausar/Reanudar */}
+                          <button
+                            onClick={pauseRecording}
+                            className="bg-yellow-400 hover:bg-yellow-500 text-white px-3 py-2 rounded-lg flex items-center"
+                          >
+                            {isPaused ? (
+                              <>
+                                <svg xmlns="http://www.w3.org/2000/svg" className="mr-1" width="16" height="16" fill="currentColor" viewBox="0 0 512 512">
+                                  <path d="M96 64l320 192-320 192z"/>
+                                </svg>
+                                Reanudar
+                              </>
+                            ) : (
+                              <>
+                                <svg xmlns="http://www.w3.org/2000/svg" className="mr-1" width="16" height="16" fill="currentColor" viewBox="0 0 448 512">
+                                  <path d="M144 63h-32C50.1 63 0 113.1 0 175v162c0 61.9 50.1 112 112 112h32c61.9 0 112-50.1 112-112V175c0-61.9-50.1-112-112-112zM368 63h-32c-61.9 0-112 50.1-112 112v162c0 61.9 50.1 112 112 112h32c61.9 0 112-50.1 112-112V175c0-61.9-50.1-112-112-112z"/>
+                                </svg>
+                                Pausar
+                              </>
+                            )}
+                          </button>
+                          {/* Botón Detener */}
+                          <button
+                            onClick={stopRecording}
+                            className="bg-red-500 hover:bg-red-600 text-white px-3 py-2 rounded-lg flex items-center"
+                          >
+                            <svg xmlns="http://www.w3.org/2000/svg" className="mr-1" width="16" height="16" viewBox="0 0 448 512" fill="currentColor">
+                              <path d="M400 32H48C21.49 32 0 53.49 0 80v352c0 26.5 21.49 48 48 48h352c26.51 0 48-21.5 48-48V80C448 53.49 426.51 32 400 32z"/>
+                            </svg>
+                            Detener
+                          </button>
+                        </div>
+                      )
+                    }
+                    {/* Contador de tiempo */}
+                    {isRecording === type.id && (
+                      <div className="text-sm text-gray-500 mt-1">
+                        Grabando: {recordTimer}s
+                      </div>
+                    )}
+                  </div>
+                  
+                  {/* Insertar etiqueta en el texto principal */}
+                  <button
+                    onClick={() => handleInsertSpeechType(type.name)}
+                    className="ml-auto px-3 py-2 bg-blue-100 hover:bg-blue-200 text-blue-600 rounded-lg transition-colors"
+                  >
+                    Insertar
+                  </button>
+                </div>
+
+                {/* Mostrar si el audio está subido */}
+                {audioData[type.id]?.audio && (
+                  <p className="mt-2 text-sm text-green-600">
+                    Audio subido: {audioData[type.id].audio}
+                  </p>
+                )}
+              </div>
             )
           ))}
         </section>
@@ -418,7 +735,6 @@ function MultiSpeechGenerator() {
           onClick={handleAddSpeechType}
           className="w-full bg-emerald-100 hover:bg-emerald-200 text-emerald-700 py-3 rounded-xl font-semibold transition-all flex items-center justify-center"
         >
-          {/* Icono: Plus Circle */}
           <svg xmlns="http://www.w3.org/2000/svg" className="mr-2" width="24" height="24" viewBox="0 0 512 512" fill="currentColor">
             <path d="M256 8C119.033 8 8 119.033 8 256s111.033 248 248 248 248-111.033 248-248S392.967 8 256 8zm124 276h-100v100c0 13.255-10.745 24-24 24s-24-10.745-24-24V284H132c-13.255 0-24-10.745-24-24s10.745-24 24-24h100V136c0-13.255 10.745-24 24-24s24 10.745 24 24v100h100c13.255 0 24 10.745 24 24s-10.745 24-24 24z"/>
           </svg>
@@ -428,7 +744,6 @@ function MultiSpeechGenerator() {
         <section className="mt-10">
           <div className="bg-gray-50 p-6 rounded-xl border border-gray-200">
             <h3 className="text-xl font-semibold text-gray-800 mb-4 flex items-center">
-              {/* Icono: Pencil Alt */}
               <svg xmlns="http://www.w3.org/2000/svg" className="mr-2" width="24" height="24" viewBox="0 0 512 512" fill="currentColor">
                 <path d="M497.9 74.1l-60.1-60.1c-18.7-18.7-49.1-18.7-67.9 0L182.3 259.7l-23.3 92.9c-2.4 9.7 2.3 19.9 11.2 24.2 9.1 4.3 19.6 1.3 26.1-6.3L416 190.1l-60.1-60.1 141.9-141.9c18.8-18.8 18.8-49.2 0-68zM106.2 351.1l92.9-23.3 189.3-189.3-69.3-69.3L129.9 258.5l-23.7 92.6zM0 464c0 26.5 21.5 48 48 48h416c26.5 0 48-21.5 48-48v-16H0v16z"/>
               </svg>
@@ -445,7 +760,6 @@ function MultiSpeechGenerator() {
 
         <section className="mt-8 bg-orange-50 p-6 rounded-xl border border-orange-200">
           <h3 className="text-xl font-semibold text-orange-800 mb-5 flex items-center">
-            {/* Icono: Sliders / Ajustes */}
             <svg xmlns="http://www.w3.org/2000/svg" className="mr-2" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
               <line x1="4" y1="21" x2="4" y2="14"></line>
               <line x1="4" y1="10" x2="4" y2="3"></line>
@@ -517,16 +831,21 @@ function MultiSpeechGenerator() {
         >
           {isGenerating ? (
             <>
-              {/* Icono: Spinner */}
-              <svg className="animate-spin h-5 w-5 mr-2" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
-                <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none"/>
-                <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"/>
+              <svg className="animate-spin h-5 w-5 mr-2" viewBox="0 0 24 24">
+                <circle className="opacity-25" cx="12" cy="12" r="10"
+                  stroke="currentColor" strokeWidth="4" fill="none"
+                />
+                <path className="opacity-75" fill="currentColor"
+                  d="M4 12a8 8 0 018-8V0C5.373 0 0 
+                  5.373 0 12h4zm2 5.291A7.962 7.962 0 
+                  014 12H0c0 3.042 1.135 5.824 3 
+                  7.938l3-2.647z"
+                />
               </svg>
               Generando Material...
             </>
           ) : (
             <>
-              {/* Icono: Magic Wand */}
               <svg xmlns="http://www.w3.org/2000/svg" className="mr-2" width="24" height="24" viewBox="0 0 512 512" fill="currentColor">
                 <path d="M510.4 17.7l-18.1-18.1c-8.5-8.5-22.4-8.5-30.9 0l-55.1 55.1c-15.5-6.3-32.2-9.8-49.5-9.8-58.6 0-106 47.4-106 106 0 17.3 3.5 33.9 9.8 49.5l-55.1 55.1c-8.5 8.5-8.5 22.4 0 30.9l18.1 18.1c8.5 8.5 22.4 8.5 30.9 0l55.1-55.1c15.5 6.3 32.2 9.8 49.5 9.8 58.6 0 106-47.4 106-106 0-17.3-3.5-33.9-9.8-49.5l55.1-55.1c8.5-8.5 8.5-22.4 0-30.9zM250.5 400.5l-70-70c-5.8-5.8-5.8-15.2 0-21l70-70c5.8-5.8 15.2-5.8 21 0l70 70c5.8 5.8 5.8 15.2 0 21l-70 70c-5.8 5.8-15.2 5.8-21 0z"/>
               </svg>
@@ -538,9 +857,11 @@ function MultiSpeechGenerator() {
         {generatedAudios.length > 0 && (
           <section className="mt-10">
             <h3 className="text-xl font-semibold mb-5 text-gray-800 flex items-center">
-              {/* Icono: History */}
               <svg xmlns="http://www.w3.org/2000/svg" className="mr-2" width="24" height="24" viewBox="0 0 512 512" fill="currentColor">
-                <path d="M504 256c0 136.967-111.033 248-248 248S8 392.967 8 256 119.033 8 256 8c76.034 0 142.021 38.596 183.293 96h-79.293v56h136v-136h-56v79.293C415.404 113.979 471.106 192.3 504 256zM256 464c114.875 0 208-93.125 208-208S370.875 48 256 48 48 141.125 48 256s93.125 208 208 208zM272 144v128h-64v64h128V144h-64z"/>
+                <path d="M504 256c0 136.967-111.033 248-248 248S8 392.967 8 256 119.033 8 
+                256 8c76.034 0 142.021 38.596 183.293 96h-79.293v56h136v-136h-56v79.293C415.404 
+                113.979 471.106 192.3 504 256zM256 464c114.875 0 208-93.125 208-208S370.875 
+                48 256 48 48 141.125 48 256s93.125 208 208 208zM272 144v128h-64v64h128V144h-64z"/>
               </svg>
               Historial de Generaciones
             </h3>
@@ -555,9 +876,9 @@ function MultiSpeechGenerator() {
                     onClick={() => handleDeleteAudio(audioPath)}
                     className="px-3 py-1 bg-red-100 hover:bg-red-200 text-red-600 rounded-lg transition-colors flex items-center"
                   >
-                    {/* Icono: Trash Alt */}
                     <svg xmlns="http://www.w3.org/2000/svg" className="mr-2" width="24" height="24" viewBox="0 0 448 512" fill="currentColor">
-                      <path d="M135.2 17.7L144 0h160l8.8 17.7L416 32H32l103.2-14.3zM400 96v368c0 26.5-21.5 48-48 48H96c-26.5 0-48-21.5-48-48V96h352z"/>
+                      <path d="M135.2 17.7L144 0h160l8.8 17.7L416 32H32l103.2-14.3zM400 
+                      96v368c0 26.5-21.5 48-48 48H96c-26.5 0-48-21.5-48-48V96h352z"/>
                     </svg>
                     Eliminar
                   </button>
@@ -570,8 +891,9 @@ function MultiSpeechGenerator() {
         {generatedAudio && (
           <div className="mt-8">
             <h3 className="text-xl font-semibold mb-4 text-gray-800 flex items-center">
-              {/* Icono: Volume Up */}
-              <svg xmlns="http://www.w3.org/2000/svg" className="mr-2" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <svg xmlns="http://www.w3.org/2000/svg" className="mr-2" width="24" height="24"
+                viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                 <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon>
                 <line x1="23" y1="9" x2="23" y2="15"></line>
                 <path d="M16 9.35a8 8 0 0 1 0 5.3"></path>
@@ -589,9 +911,15 @@ function MultiSpeechGenerator() {
                     : 'bg-purple-600 hover:bg-purple-700'
                 } flex items-center`}
               >
-                {/* Icono: Microscope */}
-                <svg xmlns="http://www.w3.org/2000/svg" className="mr-2" width="24" height="24" viewBox="0 0 576 512" fill="currentColor">
-                  <path d="M564.8 82.2c-12.1-12.1-31.8-12.1-43.9 0L448 155.1V72c0-13.3-10.7-24-24-24h-48c-13.3 0-24 10.7-24 24v83.1L195.1 82.2c-12.1-12.1-31.8-12.1-43.9 0L5.4 228.9c-12.1 12.1-12.1 31.8 0 43.9l60.1 60.1c12.1 12.1 31.8 12.1 43.9 0l89.3-89.3v140.2c0 13.3 10.7 24 24 24h48c13.3 0 24-10.7 24-24V242.7l89.3 89.3c12.1 12.1 31.8 12.1 43.9 0l60.1-60.1c12.1-12.1 12.1-31.8 0-43.9L564.8 82.2z"/>
+                <svg xmlns="http://www.w3.org/2000/svg" className="mr-2" width="24" height="24"
+                  viewBox="0 0 576 512" fill="currentColor">
+                  <path d="M564.8 82.2c-12.1-12.1-31.8-12.1-43.9 
+                  0L448 155.1V72c0-13.3-10.7-24-24-24h-48c-13.3 
+                  0-24 10.7-24 24v83.1L195.1 82.2c-12.1-12.1-31.8-12.1-43.9 
+                  0L5.4 228.9c-12.1 12.1-12.1 31.8 0 43.9l60.1 60.1c12.1 12.1 
+                  31.8 12.1 43.9 0l89.3-89.3v140.2c0 13.3 10.7 24 24 24h48c13.3 
+                  0 24-10.7 24-24V242.7l89.3 89.3c12.1 12.1 31.8 12.1 43.9 
+                  0l60.1-60.1c12.1-12.1 12.1-31.8 0-43.9L564.8 82.2z"/>
                 </svg>
                 {isAnalyzing ? 'Analizando...' : 'Personalizar Audio'}
               </button>
@@ -606,9 +934,15 @@ function MultiSpeechGenerator() {
         {modifiedAudio && (
           <div className="mt-8">
             <h3 className="text-xl font-semibold mb-4 text-gray-800 flex items-center">
-              {/* Icono: Waveform Lines */}
-              <svg xmlns="http://www.w3.org/2000/svg" className="mr-2" width="24" height="24" viewBox="0 0 640 512" fill="currentColor">
-                <path d="M64 96v320c0 17.7 14.3 32 32 32h32c17.7 0 32-14.3 32-32V96c0-17.7-14.3-32-32-32H96C78.3 64 64 78.3 64 96zM256 160v192c0 17.7 14.3 32 32 32h32c17.7 0 32-14.3 32-32V160c0-17.7-14.3-32-32-32h-32c-17.7 0-32 14.3-32 32zM448 224v128c0 17.7 14.3 32 32 32h32c17.7 0 32-14.3 32-32V224c0-17.7-14.3-32-32-32h-32c-17.7 0-32 14.3-32 32z"/>
+              <svg xmlns="http://www.w3.org/2000/svg" className="mr-2" width="24"
+                height="24" viewBox="0 0 640 512" fill="currentColor">
+                <path d="M64 96v320c0 17.7 14.3 32 32 32h32c17.7 
+                0 32-14.3 32-32V96c0-17.7-14.3-32-32-32H96C78.3 
+                64 64 78.3 64 96zM256 160v192c0 17.7 14.3 
+                32 32 32h32c17.7 0 32-14.3 32-32V160c0-17.7-14.3-32-32-32h-32c-17.7 
+                0-32 14.3-32 32zM448 224v128c0 17.7 14.3 32 
+                32 32h32c17.7 0 32-14.3 32-32V224c0-17.7-14.3-32-32-32h-32c-17.7 
+                0-32 14.3-32 32z"/>
               </svg>
               Audio con Prosodia Aplicada
             </h3>
@@ -617,9 +951,12 @@ function MultiSpeechGenerator() {
               onClick={() => handleDeleteAudio(modifiedAudio)}
               className="mt-4 px-4 py-2 bg-red-100 hover:bg-red-200 text-red-600 rounded-lg transition-colors flex items-center"
             >
-              {/* Icono: Trash Alt */}
-              <svg xmlns="http://www.w3.org/2000/svg" className="mr-2" width="24" height="24" viewBox="0 0 448 512" fill="currentColor">
-                <path d="M135.2 17.7L144 0h160l8.8 17.7L416 32H32l103.2-14.3zM400 96v368c0 26.5-21.5 48-48 48H96c-26.5 0-48-21.5-48-48V96h352z"/>
+              <svg xmlns="http://www.w3.org/2000/svg" className="mr-2" width="24"
+                height="24" viewBox="0 0 448 512" fill="currentColor">
+                <path d="M135.2 17.7L144 
+                0h160l8.8 17.7L416 32H32l103.2-14.3zM400 
+                96v368c0 26.5-21.5 48-48 48H96c-26.5 
+                0-48-21.5-48-48V96h352z"/>
               </svg>
               Eliminar Versión
             </button>

@@ -1,10 +1,14 @@
 {
     "Regular": {
-        "audio": "temp_uploads\\Regular_1738652340_grabacion.wav",
+        "audio": "temp_uploads\\Regular_1738701453_grabacion.wav",
         "ref_text": ""
     },
     "Triste": {
-        "audio": "temp_uploads\\Triste_1738652352_triste.m4a",
+        "audio": "temp_uploads\\Triste_1738701493_grabacion.wav",
+        "ref_text": ""
+    },
+    "": {
+        "audio": "temp_uploads\\1738700454_grabacion.wav",
         "ref_text": ""
     }
 }

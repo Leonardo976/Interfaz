@@ -1,4 +1,3 @@
-// src/components/SpeechTypeInput.jsx
 import React, { useState, useEffect, useRef } from 'react';
 
 function SpeechTypeInput({
@@ -82,11 +81,9 @@ function SpeechTypeInput({
     try {
       setIsUploading(true);
       if (audioFile) {
-        // Enviamos el refText incluso si está vacío
         await onAudioUpload(audioFile, refText.trim());
         setHasUploadedAudio(true);
         setAudioFile(null);
-        // Resetear el input de archivo
         const fileInput = document.querySelector(`#audio-input-${id}`);
         if (fileInput) fileInput.value = '';
       }
@@ -99,129 +96,125 @@ function SpeechTypeInput({
   };
 
   return (
-    <div className="p-4 border rounded-lg bg-gray-50">
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+    <div className="bg-white p-6 rounded-xl border-2 border-dashed border-gray-200 hover:border-solid hover:border-sky-300 transition-all">
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+        {/* Sección Nombre del Estilo */}
         <div>
-          <label
-            htmlFor={`name-input-${id}`}
-            className="block text-sm font-medium text-gray-700 mb-1"
-          >
-            Nombre del Tipo de Habla {isRegular && <span className="text-blue-600">(Principal)</span>}
+          <label className="block text-sm font-medium text-gray-700 mb-2">
+            <i className="fas fa-tag mr-2 text-sky-600"></i>
+            Nombre del Estilo
           </label>
-          <div className="flex space-x-2">
+          <div className="flex gap-2">
             <input
-              id={`name-input-${id}`}
-              type="text"
               value={name}
               onChange={(e) => onNameChange(e.target.value)}
               disabled={isRegular}
-              className={`flex-1 p-2 border rounded ${
-                isRegular ? 'bg-gray-100' : 'hover:border-blue-500 focus:border-blue-500 focus:ring-1 focus:ring-blue-500'
+              className={`flex-1 p-2.5 border-2 rounded-lg ${
+                isRegular 
+                  ? 'bg-gray-100 border-gray-200' 
+                  : 'border-sky-200 focus:border-sky-500 focus:ring-2 focus:ring-sky-200'
               }`}
-              placeholder="Ejemplo: Regular, Feliz, Triste..."
+              placeholder="Ej: Entusiasta, Serio..."
             />
             <button
               onClick={() => onInsert(name)}
               disabled={!name.trim()}
-              className="px-3 py-1 bg-blue-600 text-white rounded hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed"
+              className="px-4 bg-sky-100 hover:bg-sky-200 text-sky-700 rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
             >
-              Insertar
+              <i className="fas fa-plus mr-2"></i>Insertar
             </button>
             {!isRegular && (
               <button
                 onClick={onDelete}
-                className="px-3 py-1 bg-red-600 text-white rounded hover:bg-red-700 transition-colors"
+                className="px-4 bg-red-100 hover:bg-red-200 text-red-600 rounded-lg"
               >
-                Eliminar
+                <i className="fas fa-trash"></i>
               </button>
             )}
           </div>
         </div>
 
+        {/* Sección Subida de Audio */}
         <div>
-          <label
-            htmlFor={`audio-input-${id}`}
-            className="block text-sm font-medium text-gray-700 mb-1"
-          >
-            Audio de Referencia {hasUploadedAudio && <span className="text-green-600">(Cargado)</span>}
+          <label className="block text-sm font-medium text-gray-700 mb-2">
+            <i className="fas fa-file-upload mr-2 text-sky-600"></i>
+            Archivo de Audio
           </label>
-          <input
-            id={`audio-input-${id}`}
-            type="file"
-            accept="audio/*"
-            onChange={handleAudioChange}
-            className="block w-full text-sm text-gray-500 
-              file:mr-4 file:py-2 file:px-4 file:rounded-full file:border-0 
-              file:text-sm file:font-semibold file:bg-blue-50 file:text-blue-700 
-              hover:file:bg-blue-100 transition-all cursor-pointer"
-          />
+          <div className="flex items-center gap-3">
+            <label className="flex-1 cursor-pointer">
+              <input
+                id={`audio-input-${id}`}
+                type="file"
+                accept="audio/*"
+                onChange={handleAudioChange}
+                className="hidden"
+              />
+              <div className="w-full p-2.5 border-2 border-sky-200 rounded-lg hover:bg-sky-50 text-center text-sky-700">
+                <i className="fas fa-upload mr-2"></i>
+                {audioFile ? audioFile.name : 'Seleccionar archivo'}
+              </div>
+            </label>
+            <button
+              onClick={!isRecording ? startRecording : stopRecording}
+              className={`p-2.5 rounded-lg ${
+                isRecording 
+                  ? 'bg-red-500 hover:bg-red-600 text-white' 
+                  : 'bg-emerald-500 hover:bg-emerald-600 text-white'
+              }`}
+            >
+              <i className={`fas ${isRecording ? 'fa-stop' : 'fa-microphone'}`}></i>
+            </button>
+          </div>
           {(audioFile || hasUploadedAudio) && (
-            <p className="mt-1 text-sm text-gray-500">
-              {hasUploadedAudio ? 
-                "✓ Audio cargado correctamente" : 
-                `Archivo seleccionado: ${audioFile.name}`}
+            <p className="mt-2 text-sm text-gray-500">
+              <i className="fas fa-info-circle mr-2"></i>
+              {hasUploadedAudio 
+                ? "Audio cargado correctamente" 
+                : `Listo para subir: ${audioFile?.name}`}
             </p>
           )}
-          <div className="mt-2 flex space-x-2">
-            {!isRecording ? (
-              <button
-                onClick={startRecording}
-                className="px-3 py-1 bg-green-600 text-white rounded hover:bg-green-700 transition"
-              >
-                Grabar Audio
-              </button>
-            ) : (
-              <button
-                onClick={stopRecording}
-                className="px-3 py-1 bg-red-600 text-white rounded hover:bg-red-700 transition"
-              >
-                Detener Grabación
-              </button>
-            )}
-          </div>
         </div>
 
-        <div>
-          <label
-            htmlFor={`reftext-textarea-${id}`}
-            className="block text-sm font-medium text-gray-700 mb-1"
-          >
-            Texto de Referencia (Opcional)
+        {/* Sección Texto de Referencia */}
+        <div className="lg:col-span-2">
+          <label className="block text-sm font-medium text-gray-700 mb-2">
+            <i className="fas fa-align-left mr-2 text-sky-600"></i>
+            Texto de Referencia
           </label>
           <textarea
-            id={`reftext-textarea-${id}`}
             value={refText}
             onChange={(e) => setRefText(e.target.value)}
-            className="w-full p-2 border rounded hover:border-blue-500 focus:border-blue-500 focus:ring-1 focus:ring-blue-500"
-            rows="2"
-            placeholder="Opcional: Ingrese el texto que corresponde al audio..."
+            className="w-full p-2.5 border-2 border-sky-200 rounded-lg focus:border-sky-500 focus:ring-2 focus:ring-sky-200"
+            rows="3"
+            placeholder="Texto correspondiente al audio (ej: 'Buenos días estudiantes')..."
           />
         </div>
 
-        <div className="flex items-end">
+        {/* Botón de Subida */}
+        <div className="lg:col-span-2">
           <button
             onClick={handleSubmit}
             disabled={isUploading}
-            className={`w-full px-4 py-2 rounded transition-colors ${
+            className={`w-full p-3 rounded-lg font-medium transition-all ${
               isUploading
                 ? 'bg-gray-300 text-gray-500 cursor-not-allowed'
                 : hasUploadedAudio
-                ? 'bg-green-600 text-white hover:bg-green-700'
-                : 'bg-blue-600 text-white hover:bg-blue-700'
-            } flex items-center justify-center`}
+                ? 'bg-green-100 hover:bg-green-200 text-green-700'
+                : 'bg-sky-600 hover:bg-sky-700 text-white'
+            }`}
           >
             {isUploading ? (
               <>
-                <span className="animate-spin mr-2">⭮</span>
-                Cargando...
+                <i className="fas fa-spinner fa-spin mr-2"></i> Cargando...
               </>
             ) : hasUploadedAudio ? (
               <>
-                <span className="mr-2">✓</span>
-                Audio Cargado
+                <i className="fas fa-check-circle mr-2"></i> Audio Listo
               </>
             ) : (
-              'Cargar Audio'
+              <>
+                <i className="fas fa-cloud-upload-alt mr-2"></i> Subir Audio
+              </>
             )}
           </button>
         </div>

@@ -8,7 +8,8 @@ import AudioPlayer from './AudioPlayer';
 import ProsodyModifier from './ProsodyModifier';
 
 const MAX_SPEECH_TYPES = 100;
-
+const GUIDE_TEXT = `La Revolución Científica del siglo 17 transformó nuestra comprensión del universo. Figuras como Galileo Galilei, nacido en 1564, demostraron que la Tierra orbita alrededor del Sol, 
+desafiando teorías geocéntricas. Isaac Newton formuló las tres leyes del movimiento y la ley de gravitación universal. Estos avances sentaron las bases para la física moderna y el método científico experimental.`;
 function MultiSpeechGenerator() {
   const [speechTypes, setSpeechTypes] = useState([
     { id: 'regular', name: 'Regular', isVisible: true }
@@ -20,7 +21,7 @@ function MultiSpeechGenerator() {
   const [isGenerating, setIsGenerating] = useState(false);
   const [generatedAudio, setGeneratedAudio] = useState(null);
   const [transcriptionData, setTranscriptionData] = useState(null);
-
+  const [pendingUpload, setPendingUpload] = useState(null);
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [analyzeDone, setAnalyzeDone] = useState(false);
 
@@ -28,6 +29,7 @@ function MultiSpeechGenerator() {
   const [isProsodyGenerating, setIsProsodyGenerating] = useState(false);
   const [modifiedAudio, setModifiedAudio] = useState(null);
 
+  const refTextRefs = useRef({});
   const [audioData, setAudioData] = useState({
     regular: { audio: null, refText: '' }
   });
@@ -39,14 +41,71 @@ function MultiSpeechGenerator() {
   const [isPaused, setIsPaused] = useState(false);
   const [recordTimer, setRecordTimer] = useState(0);
   const recordTimerRef = useRef(null);
+  const customRefProvidedRef = useRef(false);
 
   // Estado para manejar la lista de audios generados
   const [generatedAudios, setGeneratedAudios] = useState([]);
 
+// Agrega este estado al componente
+const [showRecordingText, setShowRecordingText] = useState(false);
+
+const latestAudioDataRef = useRef(audioData);
+useEffect(() => {
+  latestAudioDataRef.current = audioData;
+}, [audioData]);
+
+
+const handleSetGuideTextForType = (id) => {
+  setAudioData(prev => ({
+    ...prev,
+    [id]: {
+      ...prev[id],
+      refText: GUIDE_TEXT
+    }
+  }));
+  if (refTextRefs.current[id]) {
+    refTextRefs.current[id].value = GUIDE_TEXT;
+  }
+  customRefProvidedRef.current = true; // Marcamos que se proporcionó texto custom
+  toast.success("Texto guía agregado como referencia");
+};
+
+
+const handleConfirmUpload = async () => {
+  if (!pendingUpload) return;
+  
+  const { speechTypeId, file } = pendingUpload;
+  // Leer el valor actual del textarea usando la ref y aplicar trim
+  let currentRefText = refTextRefs.current[speechTypeId]?.value || '';
+  currentRefText = currentRefText.trim();
+  
+  // Si el texto ingresado es el mismo que el texto guía o está vacío, forzamos que se envíe vacío para transcribir
+  const refText = (currentRefText === GUIDE_TEXT.trim() || currentRefText === "") 
+                    ? "" 
+                    : currentRefText;
+  
+  const styleName = findSpeechTypeNameById(speechTypeId);
+  
+  await handleAudioUpload(speechTypeId, file, refText, styleName);
+  
+  // Actualizar el estado para guardar el texto (vacío o el custom)
+  setAudioData(prev => ({
+    ...prev,
+    [speechTypeId]: {
+      ...prev[speechTypeId],
+      refText: refText
+    }
+  }));
+  
+  setPendingUpload(null);
+};
+
 // ----------------------------------------------------------------
-// Función para iniciar grabación
+// Función para iniciar grabación (versión completa actualizada)
 // ----------------------------------------------------------------
 const startRecording = async (speechTypeId) => {
+  customRefProvidedRef.current = false;
+
   try {
     // Validación de nombre para nuevos tipos de habla
     if (speechTypeId !== 'regular') {
@@ -57,17 +116,25 @@ const startRecording = async (speechTypeId) => {
       }
     }
 
-    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+    if (!navigator.mediaDevices?.getUserMedia) {
       toast.error('La API de grabación no está soportada en este navegador.');
       return;
     }
 
+
+    // Iniciar flujo de grabación
     const stream = await navigator.mediaDevices.getUserMedia({ 
       audio: {
         sampleRate: 44100,
-        channelCount: 1
+        channelCount: 1,
+        noiseSuppression: true,
+        echoCancellation: true
       }
     });
+
+    // Mostrar texto guía
+    setShowRecordingText(true);
+    setRecordTimer(0);
 
     const options = { 
       mimeType: 'audio/webm;codecs=opus',
@@ -77,6 +144,7 @@ const startRecording = async (speechTypeId) => {
     const recorder = new MediaRecorder(stream, options);
     recordedChunksRef.current = [];
 
+    // Configurar handlers
     recorder.ondataavailable = (e) => {
       if (e.data.size > 0) {
         recordedChunksRef.current.push(e.data);
@@ -84,6 +152,8 @@ const startRecording = async (speechTypeId) => {
     };
 
     recorder.onstop = async () => {
+      setShowRecordingText(false);
+      
       const blob = new Blob(recordedChunksRef.current, { 
         type: 'audio/webm;codecs=opus' 
       });
@@ -93,34 +163,34 @@ const startRecording = async (speechTypeId) => {
       const file = new File([convertedBlob], 'grabacion.wav', {
         type: 'audio/wav'
       });
-
-      const refText = audioData[speechTypeId]?.refText || '';
-      await handleAudioUpload(
-        speechTypeId, 
-        file, 
-        refText, 
-        findSpeechTypeNameById(speechTypeId)
-      );
+      
+      // En lugar de subir, guardamos el archivo y el id en pendingUpload
+      setPendingUpload({
+        speechTypeId,
+        file
+      });
       
       recordedChunksRef.current = [];
       stream.getTracks().forEach(track => track.stop());
     };
+    
 
+    // Iniciar temporizador y grabación
     recorder.start(1000);
     setMediaRecorder(recorder);
     setIsRecording(speechTypeId);
     setIsPaused(false);
-    setRecordTimer(0);
 
     recordTimerRef.current = setInterval(() => {
       setRecordTimer((prev) => prev + 1);
     }, 1000);
 
-    toast('Grabación iniciada');
+    toast.success('Grabación iniciada - Lea el texto en pantalla');
+
   } catch (error) {
     console.error('Error en grabación:', error);
-    toast.error('No se pudo iniciar la grabación');
-    // Limpiar recursos en caso de error
+    setShowRecordingText(false);
+    toast.error('Error al iniciar la grabación');
     if (mediaRecorder) {
       mediaRecorder.stream.getTracks().forEach(track => track.stop());
     }
@@ -365,10 +435,18 @@ const writeString = (view, offset, string) => {
 
   useEffect(() => {
     if (transcriptionData && transcriptionData.success && transcriptionData.transcription) {
-      setEditableTranscription(transcriptionData.transcription);
+      // Revisar si para el tipo "regular" (o el que corresponda) se tiene un texto de referencia custom
+      const customText = audioData["regular"]?.refText || "";
+      if (customText.trim() === "") {
+        // No se proporcionó texto custom, se usa la transcripción
+        setEditableTranscription(transcriptionData.transcription);
+      } else {
+        // Se proporcionó un texto custom; se usará ese valor
+        setEditableTranscription(customText.trim());
+      }
       setModifiedAudio(null);
     }
-  }, [transcriptionData]);
+  }, [transcriptionData, audioData]);
 
   /**
    * Función para parsear las modificaciones desde el texto editable.
@@ -613,8 +691,19 @@ const writeString = (view, offset, string) => {
                 </div>
 
                 <div className="mt-4">
-                  <label className="block text-sm font-semibold text-gray-700 mb-1">Texto de Referencia</label>
+                  <div className="flex items-center justify-between">
+                    <label className="block text-sm font-semibold text-gray-700 mb-1">
+                      Texto de Referencia
+                    </label>
+                    <button
+                      onClick={() => handleSetGuideTextForType(type.id)}
+                      className="ml-2 px-2 py-1 bg-blue-100 hover:bg-blue-200 text-blue-600 rounded-lg text-xs"
+                    >
+                      Agregar texto guía
+                    </button>
+                  </div>
                   <textarea
+                    ref={(el) => (refTextRefs.current[type.id] = el)}
                     className="w-full p-2 border border-gray-300 rounded"
                     rows="2"
                     value={audioData[type.id]?.refText || ''}
@@ -749,6 +838,9 @@ const writeString = (view, offset, string) => {
               </svg>
               Composición del Material
             </h3>
+            <h3 className="whitespace-pre-wrap text-sm bg-white p-4 rounded-lg border border-sky-100">
+              (Para agregar silencios solo agregue puntos suspensivos ...)
+            </h3>
             <textarea
               value={generationText}
               onChange={(e) => setGenerationText(e.target.value)}
@@ -790,7 +882,7 @@ const writeString = (view, offset, string) => {
 
             <div className="space-y-4">
               <label className="block">
-                <span className="text-gray-700 font-medium">Velocidad: {speedChange.toFixed(1)}x</span>
+                <span className="text-gray-700 font-medium">Velocidad: {speedChange.toFixed(1)}x (normal: 1.0)</span>
                 <input
                   type="range"
                   step="0.1"
@@ -805,7 +897,7 @@ const writeString = (view, offset, string) => {
 
             <div className="space-y-4">
               <label className="block">
-                <span className="text-gray-700 font-medium">Transición: {crossFadeDuration.toFixed(2)}s</span>
+                <span className="text-gray-700 font-medium">Transición: {crossFadeDuration.toFixed(2)}s (normal: 0.15s)</span>
                 <input
                   type="range"
                   step="0.05"
@@ -962,8 +1054,45 @@ const writeString = (view, offset, string) => {
             </button>
           </div>
         )}
+        {showRecordingText && (
+        <div className="fixed inset-0 bg-black bg-opacity-75 flex items-center justify-center z-50">
+          <div className="bg-white p-8 rounded-lg max-w-2xl max-h-[90vh] overflow-auto">
+            <h3 className="text-xl font-bold mb-4 text-blue-600">
+              Texto para leer durante la grabación
+            </h3>
+            <p className="text-lg leading-relaxed text-gray-800 whitespace-pre-line">
+              "La Revolución Científica del siglo 17 transformó nuestra comprensión del universo. Figuras como Galileo Galilei, nacido en 1564, demostraron que la Tierra orbita alrededor del Sol, desafiando teorías geocéntricas. Isaac Newton formuló las tres leyes del movimiento y la ley de gravitación universal. Estos avances sentaron las bases para la física moderna y el método científico experimental."
+            </p>
+            <div className="mt-6 flex justify-between items-center">
+              <p className="text-sm text-gray-500">
+                Tiempo de grabación: {recordTimer}s
+              </p>
+              <button
+                onClick={() => setShowRecordingText(false)}
+                className="bg-red-500 hover:bg-red-600 text-white px-4 py-2 rounded-lg"
+              >
+                Cerrar Texto (la grabación continuará)
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+        {pendingUpload && (
+          <div className="fixed bottom-4 right-4 p-4 bg-white rounded shadow-lg border border-gray-300">
+            <p className="mb-2 text-sm text-gray-700">
+              Audio grabado pendiente de subir. Revise y, si desea, agregue o modifique el texto de referencia.
+            </p>
+            <button
+              onClick={handleConfirmUpload}
+              className="px-4 py-2 bg-green-500 hover:bg-green-600 text-white rounded"
+            >
+              Confirmar audio
+            </button>
+          </div>
+        )}
       </div>
     </div>
+    
   );
 }
 

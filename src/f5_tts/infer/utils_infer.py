@@ -49,6 +49,8 @@ cfg_strength = 2.0
 sway_sampling_coef = -1.0
 speed = 1.0
 fix_duration = None
+MIN_ADDITIONAL_SECONDS = 6.0  # duración mínima adicional en segundos
+min_additional_frames = int(MIN_ADDITIONAL_SECONDS * target_sample_rate / hop_length)
 
 # -----------------------------------------
 
@@ -127,7 +129,7 @@ def initialize_asr_pipeline(device=device, dtype=None):
     global asr_pipe
     asr_pipe = pipeline(
         "automatic-speech-recognition",
-        model="openai/whisper-large-v3-turbo",
+        model="openai/whisper-large-v2",
         torch_dtype=dtype,
         device=device,
     )
@@ -239,11 +241,12 @@ def remove_silence_edges(audio, silence_threshold=-42):
 
 def preprocess_ref_audio_text(ref_audio_orig, ref_text, clip_short=True, show_info=print, device=device):
     show_info("Converting audio...")
+    # Exportar el audio a un archivo WAV temporal
     with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as f:
         aseg = AudioSegment.from_file(ref_audio_orig)
 
         if clip_short:
-            # 1. try to find long silence for clipping
+            # 1. Intentar encontrar silencio largo para recortar
             non_silent_segs = silence.split_on_silence(
                 aseg, min_silence_len=1000, silence_thresh=-50, keep_silence=1000, seek_step=10
             )
@@ -254,7 +257,7 @@ def preprocess_ref_audio_text(ref_audio_orig, ref_text, clip_short=True, show_in
                     break
                 non_silent_wave += non_silent_seg
 
-            # 2. try to find short silence for clipping if 1. failed
+            # 2. Si el audio aún es muy largo, intentar con silencios cortos
             if len(non_silent_wave) > 15000:
                 non_silent_segs = silence.split_on_silence(
                     aseg, min_silence_len=100, silence_thresh=-40, keep_silence=1000, seek_step=10
@@ -266,54 +269,60 @@ def preprocess_ref_audio_text(ref_audio_orig, ref_text, clip_short=True, show_in
                         break
                     non_silent_wave += non_silent_seg
 
-            aseg = non_silent_wave
-
-            # 3. if no proper silence found for clipping
-            if len(aseg) > 15000:
-                aseg = aseg[:15000]
+            # 3. Si no se encuentra un silencio adecuado, recortar a 15s
+            if len(non_silent_wave) > 15000:
+                aseg = non_silent_wave[:15000]
                 show_info("Audio is over 15s, clipping short. (3)")
+            else:
+                aseg = non_silent_wave
 
         aseg = remove_silence_edges(aseg) + AudioSegment.silent(duration=50)
         aseg.export(f.name, format="wav")
-        ref_audio = f.name
+        temp_audio_path = f.name
 
-    # Compute a hash of the reference audio file
-    with open(ref_audio, "rb") as audio_file:
+    # Calcular hash del audio exportado
+    with open(temp_audio_path, "rb") as audio_file:
         audio_data = audio_file.read()
         audio_hash = hashlib.md5(audio_data).hexdigest()
 
+    logger.info(f"Hash de audio: {audio_hash}")
+    logger.info(f"Texto recibido: {ref_text}")
+
     global _ref_audio_cache
-    if audio_hash in _ref_audio_cache:
-        # Use cached reference text
-        show_info("Using cached reference text...")
-        ref_text = _ref_audio_cache[audio_hash]
+    # Si se proporciona un texto de referencia personalizado, se utiliza y se actualiza la caché
+    if ref_text.strip():
+        show_info("Using custom reference text provided.")
+        final_ref_text = ref_text.strip()
+        _ref_audio_cache[audio_hash] = final_ref_text
     else:
-        if not ref_text.strip():
+        # Si no se proporciona texto, se revisa la caché o se transcribe el audio
+        if audio_hash in _ref_audio_cache:
+            show_info("Using cached reference text...")
+            final_ref_text = _ref_audio_cache[audio_hash]
+        else:
+            show_info("No reference text provided, transcribing reference audio...")
             global asr_pipe
             if asr_pipe is None:
                 initialize_asr_pipeline(device=device)
-            show_info("No reference text provided, transcribing reference audio...")
-            ref_text = asr_pipe(
-                ref_audio,
+            transcribed = asr_pipe(
+                temp_audio_path,
                 chunk_length_s=30,
                 batch_size=128,
                 generate_kwargs={"task": "transcribe"},
                 return_timestamps=False,
             )["text"].strip()
             show_info("Finished transcription")
-        else:
-            show_info("Using custom reference text...")
-        # Cache the transcribed text
-        _ref_audio_cache[audio_hash] = ref_text
+            final_ref_text = transcribed
+            _ref_audio_cache[audio_hash] = final_ref_text
 
-    # Ensure ref_text ends with a proper sentence-ending punctuation
-    if not ref_text.endswith(". ") and not ref_text.endswith("。"):
-        if ref_text.endswith("."):
-            ref_text += " "
+    # Asegurarse de que el texto final termina con puntuación adecuada
+    if not (final_ref_text.endswith(". ") or final_ref_text.endswith("。")):
+        if final_ref_text.endswith("."):
+            final_ref_text += " "
         else:
-            ref_text += ". "
+            final_ref_text += ". "
 
-    return ref_audio, ref_text
+    return temp_audio_path, final_ref_text
 
 
 # infer process: chunk text -> infer batches [i.e. infer_batch_process()]
@@ -366,7 +375,6 @@ def infer_process(
 
 # infer batches
 
-
 def infer_batch_process(
     ref_audio,
     ref_text,
@@ -410,11 +418,14 @@ def infer_batch_process(
         if fix_duration is not None:
             duration = int(fix_duration * target_sample_rate / hop_length)
         else:
-            # Calculate duration
             ref_text_len = len(ref_text.encode("utf-8"))
             gen_text_len = len(gen_text.encode("utf-8"))
-            duration = ref_audio_len + int(ref_audio_len / ref_text_len * gen_text_len / speed)
-
+            # Evitar división por cero (aunque ref_text no debería estar vacío aquí)
+            ratio = ref_text_len > 0 and (ref_audio_len / ref_text_len) or 1
+            additional_duration = int(ratio * gen_text_len / speed)
+            # Forzar un mínimo de duración adicional
+            additional_duration = max(additional_duration, min_additional_frames)
+            duration = ref_audio_len + additional_duration
         # inference
         with torch.inference_mode():
             generated, _ = model_obj.sample(

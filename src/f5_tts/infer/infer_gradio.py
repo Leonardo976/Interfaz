@@ -331,12 +331,12 @@ def generate_multistyle_speech():
         if "Regular" not in speech_types_dict:
             return jsonify({'error': 'No existe tipo de habla Regular configurado.'}), 400
 
+        # Verificar que para cada estilo exista un audio de referencia
         for segment in segments:
             style = segment["style"]
             if style not in speech_types_dict:
                 logger.error(f'Tipo de habla no encontrado: {style}')
                 return jsonify({'error': f'Tipo de habla no encontrado: {style}'}), 400
-
             ref_audio = speech_types_dict[style]['audio']
             if not os.path.exists(ref_audio):
                 logger.error(f'Archivo de audio no encontrado para {style}: {ref_audio}')
@@ -352,33 +352,44 @@ def generate_multistyle_speech():
             speech_type_data = speech_types_dict[style]
             ref_audio = speech_type_data['audio']
             ref_text_original = speech_type_data.get('ref_text', '')
-            ref_text = ref_text_original
+            # Para estilos que NO sean "Regular", forzamos la transcripción ignorando el texto almacenado.
+            if style != "Regular":
+                ref_text = ""
+            else:
+                ref_text = ref_text_original
 
-            audio, _ = infer(
-                ref_audio,
-                ref_text,
-                text,
-                F5TTS_ema_model,
-                remove_silence,
+            # Si se envía un override en el request, se prioriza.
+            if style in ref_text_overrides and ref_text_overrides[style].strip():
+                ref_text = ref_text_overrides[style].strip()
+
+            # Procesar el audio de referencia y obtener el texto final (se transcribe si ref_text está vacío)
+            processed_audio, processed_text = preprocess_ref_audio_text(
+                ref_audio_orig=ref_audio,
+                ref_text=ref_text,
+                show_info=lambda msg: logger.info(f"[{style}] {msg}")
+            )
+
+            # Generar el segmento de audio
+            audio_output, _ = infer(
+                ref_audio_orig=processed_audio,
+                ref_text=processed_text,
+                gen_text=text,
+                model=F5TTS_ema_model,
+                remove_silence=remove_silence,
                 cross_fade_duration=cross_fade_duration,
                 speed=speed
             )
 
             if sample_rate is None:
-                sample_rate = audio[0]
-
-            generated_audio_segments.append(audio[1])
+                sample_rate = audio_output[0]
+            generated_audio_segments.append(audio_output[1])
             logger.info(f"Segmento generado para {style} guardado.")
 
         if generated_audio_segments:
             final_audio_data = np.concatenate(generated_audio_segments)
-
-            # Generar una ruta única para el audio generado
             generated_audio_filename = f"multi_style_{uuid.uuid4().hex}.wav"
             generated_audio_path = os.path.join(app.config['GENERATED_AUDIO_FOLDER'], generated_audio_filename)
-
             sf.write(generated_audio_path, final_audio_data, sample_rate)
-
             logger.info(f"Audio final multi-estilo guardado en: {generated_audio_path}")
             return jsonify({
                 'success': True,
